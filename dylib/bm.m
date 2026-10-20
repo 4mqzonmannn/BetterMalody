@@ -46,6 +46,7 @@
 #define BM_TAG_MORE_FX    701   // 選択メニューの項目 = effect リスト
 #define BM_TAG_MORE_BPM   702   // 選択メニューの項目 = BPM リスト(元の動作)
 #define BM_TAG_PLUGINS    766   // 選択メニューの項目 = Lua プラグイン管理
+#define BM_TAG_CHOICE_BACK 773  // 選択メニュー(BPM / Effect / Plugins / Folder)の Back = メニューを閉じる
 #define BM_TAG_FOLDER     767   // 選択メニューの項目 = 曲フォルダをファイル App / Finder で開く
 #define BM_TAG_BPM_ICON   18    // 右のツールバーの2番目(メトロノーム)= 元はBPMリストを開く
 #define BM_VA_POS2BEAT    0x100021A0CULL   // {x0,x1} sub(timeline*(editor+0x2e8), int snap, double pos): 現在位置→拍(m|num<<32, den)
@@ -649,12 +650,82 @@ static void g_build_if_needed(void) {
     else if (gEditor && is_taiko(gEditor)) ((void (*)(void *, int))VA(0x10013FAE8ULL))(gEditor, 1);   // Taiko: sign effect が小節線を変えるので引き直す
 }
 static BOOL is_key_editor(void *ed) { return lay_of(ed) != NULL || is_taiko(ed); }   // Key / Slide / Taiko
+static void **sel_vec(void *ed);
+static void sel_add(void *ed, void *sp);
+static void *sprite_for_note(void *ed, void *note);
+// Slide: 全ノートのスプライトを作り直す(標準の削除処理の前半 + 生成処理。節を変えたときの pl_rebuild_dirty と同じ手順)。選択は維持する
+static void preview_rebuild_slide(void *ed) {
+    uint8_t *e = (uint8_t *)ed;
+    nvec *ch = node_children(*(void **)(e + 1472));
+    NSMutableArray<NSValue *> *notes = [NSMutableArray array];
+    for (void **p = ch->begin; p != ch->end; p++) {
+        void *note = VT(*p, 704, void *(*)(void *))(*p);
+        if (note) [notes addObject:[NSValue valueWithPointer:note]];
+    }
+    NSMutableSet<NSValue *> *sel = [NSMutableSet set];
+    {
+        void **sv = sel_vec(ed);
+        for (void **q = (void **)sv[0]; q != (void **)sv[1]; q++) {
+            void *note = VT(*q, 704, void *(*)(void *))(*q);
+            if (note) [sel addObject:[NSValue valueWithPointer:note]];
+        }
+    }
+    int n = 0;
+    for (NSValue *nv in notes) {
+        uint8_t *note = nv.pointerValue;
+        void **vb = *(void ***)(e + 1536), **ve = *(void ***)(e + 1544);
+        for (void **p = vb; p && p != ve; p++) {
+            if (VT(*p, 704, void *(*)(void *))(*p) != note) continue;
+            if (*p == *(void **)(e + 1584)) *(void **)(e + 1584) = NULL;
+            void **sv = sel_vec(ed);
+            for (void **q = (void **)sv[0]; q != (void **)sv[1]; q++) {
+                if (*q != *p) continue;
+                memmove(q, q + 1, (size_t)((uint8_t *)sv[1] - (uint8_t *)(q + 1)));
+                sv[1] = (uint8_t *)sv[1] - 8;
+                break;
+            }
+            VT(*(void **)(e + 1472), 616, void (*)(void *, void *, int))(*(void **)(e + 1472), *p, 1);
+            memmove(p, p + 1, (size_t)((uint8_t *)ve - (uint8_t *)(p + 1)));
+            *(void ***)(e + 1544) = ve - 1;
+            break;
+        }
+        if (note[113] & 8) ((void *(*)(void *, void *))VA(0x1000C88C8ULL))(ed, note);
+        else ((void (*)(void *, void *))VA(0x1000C8A68ULL))(ed, note);
+        void *sp = sprite_for_note(ed, note);
+        if (sp) VT(ed, 1664, void (*)(void *, void *))(ed, note);
+        if (sp && [sel containsObject:nv]) sel_add(ed, sp);
+        n++;
+    }
+    *((uint8_t *)ed + 883) = 1;
+    os_log(L, "preview off: rebuilt %d slide notes", n);
+}
+// FX プレビューを切るとき: 自前の配置(ノートの y / Hold の長さ / Slide の経路)を引きずらないよう、ゲーム標準のノート更新(移動・編集のときと同じ
+//   Key = sub_1001B2B84 / Slide = sub_1000C7CE8)を全ノートに掛けて、表示を読み込み直す。
+static void preview_reload_notes(void *ed) {
+    const Lay *l = lay_of(ed);
+    if (!l) return;
+    nvec *ch = node_children(*(void **)((uint8_t *)ed + 1472));
+    NSMutableArray<NSValue *> *sprites = [NSMutableArray array];
+    for (void **p = ch->begin; p != ch->end; p++) [sprites addObject:[NSValue valueWithPointer:*p]];   // 更新中に子が増減しても安全なよう先に控える
+    int n = 0;
+    for (NSValue *sv in sprites) {
+        void *sp = sv.pointerValue;
+        void *note = VT(sp, 704, void *(*)(void *))(sp);
+        if (!note) continue;
+        if (!l->slide) ((void (*)(float *, void *, void *))VA(0x1001B2B84ULL))((float *)ed, note, sp);
+        else if (!(((uint8_t *)note)[113] & 8)) ((void (*)(void *, void *, void *))VA(0x1000C7CE8ULL))(ed, note, sp);   // Slide の経路スプライトは作り直しが重いので、ウィップだけ
+        n++;
+    }
+    *((uint8_t *)ed + 883) = 1;
+    os_log(L, "preview off: reloaded %d notes", n);
+}
 static void preview_set(BOOL on) {
     if (!is_key_editor(gEditor)) return;
     gPreview = on;
     gMarkers = on;           // FX プレビュー ON でマーカーも表示 / OFF で消す(以後はメニューで個別に切替可能)
     if (on) g_build();
     ed_relayout(gEditor);
+    if (!on) { if (lay_of(gEditor) && lay_of(gEditor)->slide) preview_rebuild_slide(gEditor); else preview_reload_notes(gEditor); }
 }
 
 static size_t eff_count(void) { return gWork.count; }
@@ -1008,8 +1079,9 @@ static void menu_show_items(void *self, const MItem *items, int n) {   // 「そ
 }
 static void menu_show_choice(void *self) {   // BPM / Effect の選択メニュー
     static const MItem it[] = { { BM_TAG_MORE_BPM, "ui-edit-icon1.png", "BPM" }, { BM_TAG_MORE_FX, "ui-edit-icon8.png", "Effect" },
-                                  { BM_TAG_PLUGINS, "ui-edit-icon28.png", "Plugins" }, { BM_TAG_FOLDER, "ui-edit-icon19.png", "Folder" } };
-    menu_show_items(self, it, 4);
+                                  { BM_TAG_PLUGINS, "ui-edit-icon28.png", "Plugins" }, { BM_TAG_FOLDER, "ui-edit-icon19.png", "Folder" },
+                                  { BM_TAG_CHOICE_BACK, "ui-edit-icon15.png", "< Back" } };
+    menu_show_items(self, it, 5);
 }
 
 // ---- 選択操作(全選択 / 反転 / 解除): 標準エディタの選択状態(選択スプライトのベクタ)を直接操作する ----
@@ -1663,7 +1735,7 @@ static void speed_highlight(void *ed) {
     gSpdShown = pct; gSpdShownEd = ed;
 }
 static void speed_set(void *ed, int pct) {
-    if (pct < 10) pct = 10;
+    if (pct < 15) pct = 15;       // 下限 0.125 倍(make_slow_patch.py)に収まる範囲
     if (pct > 100) pct = 100;
     uint8_t *e = (uint8_t *)ed;
     *(*(uint8_t **)(e + 728) + 498) = (uint8_t)pct;
@@ -2094,7 +2166,7 @@ static intptr_t hook_touch(void *self, int ev, void *node, void *pos) {
         if (gMenuSwapped && ev == 3 && is_cat_submenu_tag(tag)) {                // サブメニュー項目: 処理後(非同期)に元の「その他」へ戻す
             dispatch_async(dispatch_get_main_queue(), ^{ menu_restore(); });
         }
-        if (gMenuSwapped && tag != BM_TAG_MORE_BPM && tag != BM_TAG_MORE_FX && tag != BM_TAG_PLUGINS && tag != BM_TAG_FOLDER && !is_cat_submenu_tag(tag) && tag != BM_TAG_CAT_BACK && gMenuToolbar == (uint8_t *)self + 1400) {
+        if (gMenuSwapped && tag != BM_TAG_MORE_BPM && tag != BM_TAG_MORE_FX && tag != BM_TAG_PLUGINS && tag != BM_TAG_FOLDER && tag != BM_TAG_CHOICE_BACK && !is_cat_submenu_tag(tag) && tag != BM_TAG_CAT_BACK && gMenuToolbar == (uint8_t *)self + 1400) {
             void *pop = menu_popup(gMenuToolbar);
             int vis = pop ? VT(pop, 344, int (*)(void *))(pop) : 0;
             if (!vis) menu_restore();
@@ -2175,6 +2247,14 @@ static intptr_t hook_touch(void *self, int ev, void *node, void *pos) {
                 int cat = tag;
                 dispatch_async(dispatch_get_main_queue(), ^{ cat_show(self, cat); });   // 項目のクリック処理が戻ってから差し替える
             }
+            return 0;
+        }
+        if (tag == BM_TAG_CHOICE_BACK && (lay_of(self) || is_taiko(self))) {   // 選択メニューの Back: 元へ戻してメニューを閉じる
+            if (ev == 3) dispatch_async(dispatch_get_main_queue(), ^{
+                menu_restore(); void *tb = (uint8_t *)self + 1400; VT(menu_popup(tb), 336, void (*)(void *, int))(menu_popup(tb), 0);
+                void *r = ((void *(*)(void *, int))VA(0x1005470B4ULL))(*(void **)((uint8_t *)self + 0x3e0), 1);     // BPM アイコンで畳んだ右メインメニューを戻す
+                ((void (*)(void *, int))VA(0x10053CF04ULL))(r, 0);
+            });
             return 0;
         }
         if (tag == BM_TAG_CAT_BACK && lay_of(self)) {   // 戻る: 元の「その他」を再表示
@@ -2487,9 +2567,9 @@ static void ovl_update(void *a1) {
 // ゲームのテクスチャ/スプライト生成関数で Sprite 化してノートコンテナ(editor+1472)の背面へ追加する。
 // 縦 = 時間(拍に比例。FX プレビュー中は G で歪める) / 横 = 周波数(左=低音)。
 #define SPEC_BANDS 96
-#define SPEC_TILE_BEATS 16
+#define SPEC_TILE_BEATS 4    // タイルの拍数。タイル内は G を直線で近似するので、FX プレビュー(scroll 変化)での誤差を小さくするため短めに
 #define SPEC_RPB 16
-typedef struct { int frames; int bands; float hopSec; uint8_t *q; } BMSpec;
+typedef struct { int frames; int bands; float hopSec; float centerSec; uint8_t *q; } BMSpec;   // centerSec = 窓の中心(N/2)の時刻。フレーム f の時刻 = f*hopSec + centerSec
 static BMSpec *gSpec;                 // 計算済みデータ(メインスレッドで参照)
 static volatile int gSpecState;       // 0=未 1=計算中 2=完了 3=失敗
 static int gSpecAlpha = 200;          // 0..255 (既定 約78%。スペクトログラムを主役にする)
@@ -2560,7 +2640,8 @@ static BMSpec *spec_compute(const char *path) {
         n += got;
     }
     free(buf); stb_vorbis_close(v);
-    const int N = 2048, LOG2N = 11, H = (int)lroundf(sr * 0.0058f);
+    // 窓長 = 時間方向のにじみ。44.1k/48k で 2048(約 43〜46ms)だと音の切れ目が遅れて残るので 1024(約 21〜23ms)にする
+    const int N = sr > 32000 ? 1024 : 512, LOG2N = sr > 32000 ? 10 : 9, H = (int)lroundf(sr * 0.0058f);
     if (n < (size_t)N * 2 || H < 1) { free(mono); return NULL; }
     int frames = (int)((n - N) / H) + 1;
     int half = N / 2;
@@ -2603,7 +2684,7 @@ static BMSpec *spec_compute(const char *path) {
     float hiDb = sm[(size_t)(ns * 0.995)], loDb = hiDb - 70.0f;
     free(sm);
     BMSpec *sp = calloc(1, sizeof(BMSpec));
-    sp->frames = frames; sp->bands = SPEC_BANDS; sp->hopSec = (float)H / sr;
+    sp->frames = frames; sp->bands = SPEC_BANDS; sp->hopSec = (float)H / sr; sp->centerSec = (float)(N / 2) / sr;
     sp->q = malloc(cnt);
     for (size_t i = 0; i < cnt; i++) {
         float t = (db[i] - loDb) / (hiDb - loDb);
@@ -2615,6 +2696,16 @@ static BMSpec *spec_compute(const char *path) {
     return sp;
 }
 
+static double spec_ms_of_beat(double beat);
+// 譜面(メモリ上)の音源オフセット。保存関数 sub_1001D2CF4 が書き出す音源一覧 = chart+0xD0 の vector(88B 要素: +8 音源名 std::string /
+//   +0x3C vol / +0x40 拍 / +0x54 offset(int))。chart = outer+8 なので outer+216 / +224。保存前の変更も反映される。取れなければ NAN
+static double spec_live_offset(void *outer) {
+    if (!outer) return NAN;
+    uint8_t *b = *(uint8_t **)((uint8_t *)outer + 216), *en = *(uint8_t **)((uint8_t *)outer + 224);
+    if (!b || en <= b || (en - b) % 88 || (en - b) / 88 > 16) return NAN;
+    int32_t off = *(int32_t *)(b + 0x54);
+    return (off > -600000 && off < 600000) ? (double)off : NAN;
+}
 static void spec_start(void *ed) {
     if (gSpecState == 1) return;
     void *outer = *(void **)((uint8_t *)ed + 0x2d8);
@@ -2629,7 +2720,9 @@ static void spec_start(void *ed) {
     }
     if (!snd) { gSpecState = 3; ed_toast_text(ed, "Spectrogram: no audio in chart", 2); return; }
     NSString *ogg = [[mc stringByDeletingLastPathComponent] stringByAppendingPathComponent:snd];
-    gSpecOffsetMs = off;
+    double live = spec_live_offset(outer);
+    os_log(L, "spec: offset file=%.0f memory=%.0f", off, live);   // memory(NaN でなければ)を使う
+    gSpecOffsetMs = isnan(live) ? off : live;
     gSpecPath = ogg;
     gSpecState = 1;
     ed_toast_text(ed, "Spectrogram: analyzing...", 4);
@@ -2638,6 +2731,7 @@ static void spec_start(void *ed) {
         BMSpec *r = spec_compute(ogg.UTF8String);
         dispatch_async(dispatch_get_main_queue(), ^{
             gSpec = r; gSpecState = r ? 2 : 3;
+            if (r) { deq *bq = BPMQ(); { char tb[400]; int o = 0; static const int bs[] = { 0, 64, 256, 600, 640, 700, 800, 1000, 1500, 2000 }; for (int q = 0; q < 10; q++) o += snprintf(tb + o, sizeof tb - o, " t(%d)=%.1f", bs[q], spec_ms_of_beat(bs[q])); os_log(L, "spec: time map offset=%.0f bpmCount=%lu%{public}s", gSpecOffsetMs, (unsigned long)(bq ? bq->size : 0), tb); } }
             if (!r) os_log(L, "spec: decode failed");
         });
     });
@@ -2646,17 +2740,14 @@ static void spec_start(void *ed) {
 // 拍 → 音源上の時刻(ms)。BPM リスト(editor の outer+584)の拍と拍長から積算する
 static double spec_ms_of_beat(double beat) {
     deq *q = BPMQ();
-    if (!gOuter || !q->size) return gSpecOffsetMs + beat * 500.0;
-    double t = 0, pb = 0, len = *(double *)(deq_at(q, 0) + 40);
-    for (size_t i = 0; i < q->size; i++) {
-        uint8_t *e = deq_at(q, i);
-        double b = beat_key(e);
-        if (b > beat) break;
-        if (i > 0) t += (b - pb) * len;
-        pb = b; len = *(double *)(e + 40);
-        if (!(len > 0)) len = 500.0;
-    }
-    return gSpecOffsetMs + t + (beat - pb) * len;
+    if (!gOuter || !q->size) return beat * 500.0 - gSpecOffsetMs;
+    // ゲーム自身の「拍 → 時刻」(BPM の変化・delay も含む)を使い、音源上の時刻 = 譜面の時刻 − offset(offset 正 = 音源が譜面の時刻 0 より遅れて始まる。mourning の実データでノート位置と音の立ち上がりが揃うのは −offset)
+    uint8_t buf[24] = {0};
+    long m = (long)floor(beat); double fr = beat - (double)m;
+    long den = 16384, num = lround(fr * den);
+    if (num >= den) { m += 1; num = 0; }
+    *(int32_t *)(buf + 8) = (int32_t)m; *(int32_t *)(buf + 16) = (int32_t)num; *(int32_t *)(buf + 20) = (int32_t)den;
+    return time_of(buf) - gSpecOffsetMs;
 }
 
 static void *spec_make_tile(void *ed, int k) {
@@ -2668,9 +2759,9 @@ static void *spec_make_tile(void *ed, int k) {
         // 画像の先頭行 = 最も後ろの拍(画面上側)
         double b0 = (double)(k + 1) * SPEC_TILE_BEATS - (r + 1.0) / SPEC_RPB, b1 = b0 + 1.0 / SPEC_RPB;
         double t0 = spec_ms_of_beat(b0), t1 = spec_ms_of_beat(b1);
-        double f0 = t0 / 1000.0 / gSpec->hopSec, f1 = t1 / 1000.0 / gSpec->hopSec;
-        int a = (int)floor(f0), z = (int)floor(f1);
-        if (z < a) z = a;
+        double f0 = (t0 / 1000.0 - gSpec->centerSec) / gSpec->hopSec, f1 = (t1 / 1000.0 - gSpec->centerSec) / gSpec->hopSec;   // 窓の中心の時刻で表示(窓の先頭で表示すると約 23ms 早く見える)
+        int a = (int)ceil(f0), z = (int)ceil(f1) - 1;           // 窓の中心が行の時間範囲 [t0, t1) に入るフレーム
+        if (z < a) a = z = (int)lround((f0 + f1) * 0.5);       // 行がホップより短いときは最寄りの 1 フレーム
         for (int b = 0; b < W; b++) {
             int m = 0;
             for (int f = a; f <= z; f++) {
@@ -2700,9 +2791,56 @@ static void *spec_make_tile(void *ed, int k) {
     return sp;
 }
 static void *gSpecDbg;
-static void spec_add_to_container(void *ed, void *sp) {
+// タイルはノートの容器(+1472)の子にせず、専用の入れ物(エディタ直下)へ載せる。容器の子に混ぜると、標準の処理が子の並び(ノートだけの前提)を
+// 頼りにするため、タイルの数に応じて一定区間のノートが表示されたり消えたりした(FX プレビューを切った後など)。
+// 入れ物の位置と拡縮は毎フレーム容器に合わせる(スクロール・レーンの縮小に追従)。
+static void *gSpecHolder;
+// 子ノードの zOrder フィールド(オフセット)を実行時に特定する: エディタ直下の子の並び(zOrder 昇順)に対して単調増加になる int フィールド
+static int spec_z_offset(void *ed) {
+    static int off = -2;
+    if (off != -2) return off;
+    off = -1;
+    nvec *ch = node_children(ed);
+    size_t n = (size_t)(ch->end - ch->begin);
+    if (n < 4 || n > 400) return off;
+    for (int o = 48; o < 400 && off < 0; o += 4) {
+        int distinct = 0; BOOL ok = YES; int prev = INT32_MIN;
+        for (void **p = ch->begin; p != ch->end; p++) {
+            int v = *(int *)((uint8_t *)*p + o);
+            if (v < prev) { ok = NO; break; }
+            if (v != prev) distinct++;
+            prev = v;
+        }
+        if (ok && distinct >= 3) off = o;
+    }
     void *cont = *(void **)((uint8_t *)ed + 1472);
-    VT(cont, 504, void (*)(void *, void *, int))(cont, sp, -100);
+    os_log(L, "spec: zOrder field offset=%d container z=%d (children=%zu)", off, off >= 0 ? *(int *)((uint8_t *)cont + off) : 0, n);
+    return off;
+}
+static void *spec_holder(void *ed) {
+    if (gSpecHolder) return gSpecHolder;
+    void *h = ((void *(*)(void))VA(0x100544A64ULL))();
+    if (!h) return NULL;
+    int zo = spec_z_offset(ed);
+    void *cont = *(void **)((uint8_t *)ed + 1472);
+    int z = (zo >= 0 && cont) ? *(int *)((uint8_t *)cont + zo) - 1 : -1;   // 容器の 1 つ後ろ(ノートの背面・グリッド / 背景の前面。従来の「容器の子・最背面」と同じ並び)
+    VT(ed, 504, void (*)(void *, void *, int))(ed, h, z);
+    gSpecHolder = h;
+    return h;
+}
+static void spec_holder_sync(void *ed) {
+    void *h = gSpecHolder, *cont = *(void **)((uint8_t *)ed + 1472);
+    if (!h || !cont) return;
+    float p[2] = { VT(cont, 192, float (*)(void *))(cont), VT(cont, 208, float (*)(void *))(cont) };
+    VT(h, 136, void (*)(void *, float *))(h, p);
+    *(float *)((uint8_t *)h + 64) = *(float *)((uint8_t *)cont + 64);      // scaleX / scaleY(レーン縮小で容器が縮むとき)
+    *(float *)((uint8_t *)h + 68) = *(float *)((uint8_t *)cont + 68);
+    uint8_t *b = (uint8_t *)h; b[168] = 1; b[368] = 1; b[300] = 1; b[437] = 1;   // 変換の再計算(縮小の処理と同じ印)
+}
+static void spec_add_to_container(void *ed, void *sp) {
+    void *h = spec_holder(ed);
+    if (!h) return;
+    VT(h, 504, void (*)(void *, void *, int))(h, sp, 0);
 }
 
 static void spec_hide_all(void) {
@@ -2711,11 +2849,21 @@ static void spec_hide_all(void) {
 static void spec_update(void *ed) {
     const Lay *l = lay_of(ed);
     if (!l) return;
-    if (gSpecEditor != ed) { gSpecDbg = NULL; gSpecEditor = ed; gSpecTiles = [NSMutableDictionary dictionary]; gSpecState = 0; gSpec = NULL; gSpecOn = NO; }
+    if (gSpecEditor != ed) { gSpecDbg = NULL; gSpecHolder = NULL; gSpecEditor = ed; gSpecTiles = [NSMutableDictionary dictionary]; gSpecState = 0; gSpec = NULL; gSpecOn = NO; }
     if (!gSpecOn) { if (gSpecTiles.count) spec_hide_all(); return; }
     if (gSpecState == 0) { gOuter = *(void **)((uint8_t *)ed + 0x2d8); spec_start(ed); return; }
     if (gSpecState != 2 || !gSpec) return;
     gOuter = *(void **)((uint8_t *)ed + 0x2d8);
+    spec_holder_sync(ed);
+    {   // 譜面のオフセットが変わったら(情報画面 / Check offset の適用)、タイルを作り直す
+        double live = spec_live_offset(gOuter);
+        if (!isnan(live) && live != gSpecOffsetMs) {
+            os_log(L, "spec: offset changed %.0f -> %.0f", gSpecOffsetMs, live);
+            gSpecOffsetMs = live;
+            for (NSValue *v in gSpecTiles.allValues) VT(v.pointerValue, 608, void (*)(void *, int))(v.pointerValue, 1);   // removeFromParentAndCleanup
+            [gSpecTiles removeAllObjects];
+        }
+    }
     uint8_t *e = (uint8_t *)ed;
     static int dbgN;
     float H0 = LF(ed, 128);
@@ -2731,7 +2879,7 @@ static void spec_update(void *ed) {
     double pos = *(double *)(e + 872);
     double span = H0 / K;                        // 画面に入る拍数
     int kmin = (int)floor((pos - span * 0.6) / SPEC_TILE_BEATS), kmax = (int)floor((pos + span * 1.6) / SPEC_TILE_BEATS);
-    if (kmin < 0) kmin = 0;
+    if (kmin < -1) kmin = -1;
     int made = 0;
     for (NSNumber *kn in gSpecTiles.allKeys) {      // 範囲外は隠す
         int kk = kn.intValue;
@@ -2762,24 +2910,13 @@ static void spec_update(void *ed) {
 
 
 // ---- オフセット検証: 強いアタックと拍グリッド(1/4拍)のズレを集計し、提案オフセットを示す ----
-static double spec_beat_of_ms(double ms) {   // spec_ms_of_beat の逆写像
-    deq *q = BPMQ();
-    double t = ms - gSpecOffsetMs;
-    if (!gOuter || !q->size) return t / 500.0;
-    double tt = 0, pb = 0, len = *(double *)(deq_at(q, 0) + 40);
-    if (!(len > 0)) len = 500.0;
-    for (size_t i = 0; i < q->size; i++) {
-        uint8_t *e = deq_at(q, i);
-        double b = beat_key(e);
-        if (i > 0) {
-            double segEnd = tt + (b - pb) * len;
-            if (segEnd > t) break;
-            tt = segEnd;
-        }
-        pb = b; len = *(double *)(e + 40);
-        if (!(len > 0)) len = 500.0;
+static double spec_beat_of_ms(double ms) {   // spec_ms_of_beat の逆写像(単調なので二分探索)
+    double lo = -4.0, hi = 20000.0;
+    for (int k = 0; k < 60; k++) {
+        double mid = (lo + hi) * 0.5;
+        if (spec_ms_of_beat(mid) < ms) lo = mid; else hi = mid;
     }
-    return pb + (t - tt) / len;
+    return (lo + hi) * 0.5;
 }
 static void spec_offset_check(void *ed) {
     if (gSpecState != 2 || !gSpec) { ed_toast_text(ed, "Spectrogram: turn ON and wait for analysis", 3); return; }
@@ -2806,7 +2943,7 @@ static void spec_offset_check(void *ed) {
     NSMutableArray<NSNumber *> *all = [NSMutableArray array], *loc = [NSMutableArray array];
     for (int f = 1; f < F - 1; f++) {
         if (flux[f] < thr || flux[f] < flux[f - 1] || flux[f] <= flux[f + 1]) continue;
-        double ms = (f + 1) * (double)gSpec->hopSec * 1000.0;
+        double ms = (((double)f - 0.5) * gSpec->hopSec + gSpec->centerSec) * 1000.0;   // 増加量はフレーム f-1 と f の間 → 両者の中心の中点
         double b = spec_beat_of_ms(ms);
         if (b < 0) continue;
         double g = round(b * 4.0) / 4.0;
@@ -2826,7 +2963,7 @@ static void spec_offset_check(void *ed) {
     char buf[160];
     if (!ra) { ed_toast_text(ed, "Offset check: not enough onsets", 3); return; }
     double m = [ra[0] doubleValue];
-    int sug = (int)lround(gSpecOffsetMs + m);
+    int sug = (int)lround(gSpecOffsetMs - m);      // 音源上の時刻 = 譜面の時刻 − offset なので、音がグリッドより m だけ遅いなら offset を m 減らす
     gSpecSuggest = sug;
     if (rl) snprintf(buf, sizeof buf, "Offset: all %+.0fms (n=%d)  here %+.0fms (n=%d)  -> %d", m, [ra[2] intValue], [rl[0] doubleValue], [rl[2] intValue], sug);
     else snprintf(buf, sizeof buf, "Offset: %+.0fms (sd %.0f, n=%d)  -> suggest %d", m, [ra[1] doubleValue], [ra[2] intValue], sug);
@@ -2939,14 +3076,51 @@ static intptr_t hook_s_touch(void *a1, int ev, void *a3, void *pos) {   // sub_1
     if (lasso_touch(a1, ev, pos)) return 1;
     pl_right_lane_unmap(pos);                // 縮んだレーンの座標戻しは自前の処理だけ。標準の処理には元の画面座標を渡す
     if (ev == 0 && lay_of(a1)) sel_snapshot_take(a1);
+    int selBefore = 0; uint8_t *selNote = NULL;
+    if (ev == 0) {   // 診断: 選択中のスライドがあるとき、レーンの押下で選択がどうなるか(seg の beat が重複するスライドを解除できない件)
+        void **sv = sel_vec(a1);
+        selBefore = (int)(((void **)sv[1] - (void **)sv[0]));
+        if (selBefore == 1) selNote = VT(*(void **)sv[0], 704, uint8_t *(*)(void *))(*(void **)sv[0]);
+    }
     intptr_t r = orig_s_touch(a1, ev, a3, pos);
+    if (ev == 0 && selBefore) {
+        void **sv = sel_vec(a1);
+        int selAfter = (int)(((void **)sv[1] - (void **)sv[0]));
+        uint8_t *tb = (uint8_t *)a1;
+        if (selNote && (selNote[113] & 8)) {
+            uint8_t *sb = *(uint8_t **)(selNote + 136), *se = *(uint8_t **)(selNote + 144);
+            os_log(L, "slide-sel: tool=%d sel %d->%d ret=%ld head=%.4f end=%.4f segs=%ld lastSeg=%.4f edit880=%d cur1584=%d", *(int *)(tb + 1368), selBefore, selAfter, (long)r,
+                   note_beat(selNote, 64, 72, 76), note_beat(selNote, 88, 96, 100), (long)((se - sb) / 28), se > sb ? note_beat(se - 28, 0, 8, 12) : -1.0, tb[880], *(void **)(tb + 1584) != NULL);
+        } else os_log(L, "slide-sel: tool=%d sel %d->%d ret=%ld (non-path)", *(int *)(tb + 1368), selBefore, selAfter, (long)r);
+    }
     ord_track(a1, ev);
     return r;
 }
 static keytouch_fn orig_snote;
+// 経路(PathSpriteEditor)の当たり判定は「いずれかの中継点が押された位置に当たるか」(vtable +1128)。seg の beat が重複するスライドでは、中継点の 1 つが
+// どこを押しても「当たり」を返す(本家のバグ)ため、押下がそのスライドに奪われ、レーンの処理(選択解除など)に届かず、選択を解除できなかった。
+// 押された位置の近く(中継点の大きさの 2 倍強)に中継点が 1 つも無ければ、本当は外れなので、押下を消費せず次の処理(レーン)へ渡す。
+static BOOL path_tap_near_point(void *path, const void *pos) {
+    typedef struct { float v[2]; uint64_t pad[2]; } V2Ret;
+    V2Ret r = ((V2Ret (*)(void *, const void *))VA(0x100546980ULL))(path, pos);   // 押された位置 → 経路スプライトの座標
+    void **cb = *(void ***)((uint8_t *)path + 648), **ce = *(void ***)((uint8_t *)path + 656);
+    if (!cb || cb >= ce || (ce - cb) > 4096) return YES;                           // 想定外の構造 = 標準の判定に任せる
+    for (void **c = cb; c != ce; c++) {
+        float cx = VT(*c, 192, float (*)(void *))(*c), cy = VT(*c, 208, float (*)(void *))(*c);
+        if (fabsf(r.v[0] - cx) <= 200.0f && fabsf(r.v[1] - cy) <= 200.0f) return YES;
+    }
+    return NO;
+}
 static intptr_t hook_s_note(void *a1, int ev, void *a3, void *pos) {   // sub_1000C7224: ノート自身へのタッチ(選択・移動)。順番に選択はここで選択が更新された後に控える
     intptr_t r = orig_snote(a1, ev, a3, pos);
     ord_track(a1, ev);
+    return r;
+}
+typedef intptr_t (*pathhit_fn)(void *, const void *);
+static pathhit_fn orig_pathhit;
+static intptr_t hook_pathhit(void *path, const void *pos) {   // sub_100167514: PathSpriteEditor の当たり判定(押した位置が中継点に当たるか)
+    intptr_t r = orig_pathhit(path, pos);
+    if (r && pos && !path_tap_near_point(path, pos)) return 0;  // どの中継点からも遠いのに「当たり」= 重複 beat の中継点の誤判定
     return r;
 }
 static void hook_uiinit(void *self, void *layout) {   // sub_100073140: UI初期化後に Effect パネルのノードを結び付ける
@@ -3197,6 +3371,7 @@ __attribute__((constructor)) static void bm_init(void) {
     orig_tbars = (tbars_fn)VA(0x100005368ULL); slots[38] = (void *)hook_tbars;              // tbars(cave 0x100005358 + 16): Taiko の小節線スプライト
     orig_tgrid = (tgrid_fn)VA(0x100005380ULL); slots[39] = (void *)hook_tgrid;              // tgrid(cave 0x100005370 + 16): Taiko のグリッド再構築
     orig_tgridpos = (tgridpos_fn)VA(0x100005398ULL); slots[40] = (void *)hook_tgridpos;     // tgridpos(cave 0x100005388 + 16): Taiko のグリッド位置
+    orig_pathhit = (pathhit_fn)VA(0x1000053C8ULL); slots[42] = (void *)hook_pathhit;          // pathhit(cave 0x1000053B8 + 16): 重複 beat のスライドの当たり判定の誤判定を外す
     orig_snote = (keytouch_fn)VA(0x1000053B0ULL); slots[41] = (void *)hook_s_note;               // snote(cave 0x1000053A0 + 16): Slide のノートへのタッチ
     {
         NSUserDefaults *u = NSUserDefaults.standardUserDefaults;

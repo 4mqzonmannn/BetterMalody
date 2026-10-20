@@ -43,14 +43,14 @@ _right-icon{n}-{i_redo}
     tag=771
 """
 R3_PL = """_plr
-    size=190,100%-{rightT}-{rightT}
-    anchor=5
-    pos=100%-{rightW}-6,50%
+    size=130,100%-{rightT}-{rightT}
+    anchor=3
+    pos=142,50%
     zindex=45
     show=0
 _right-pl
     type=101
-    size=190,100%-{rightT}-{rightT}
+    size=130,100%-{rightT}-{rightT}
     size2=0,6
     anchor=6
     pos=0,0
@@ -560,6 +560,7 @@ _plcicon-[1-4]
     fsize=35
     pos=115,30
 """
+
 A3 = "_bpmicon-3\n    parent=_bpmb-3\n    text=Add\n"
 A4 = "_bpmicon-[2,3]\n    fsize=35\n    pos=125,30\n"
 

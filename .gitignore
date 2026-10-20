@@ -8,3 +8,4 @@ dylib/third_party/lua/lua.tar.gz
 *.log
 .DS_Store
 __pycache__/
+docs/

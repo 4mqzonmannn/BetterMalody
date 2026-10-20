@@ -22,6 +22,6 @@ if ! otool -L "$BIN" | grep -q BetterMalody.dylib; then
 fi
 # ファイルアプリ: Documents 共有は元から有効。他アプリ/ファイルアプリからの「その場で編集」を許可する
 plutil -replace LSSupportsOpeningDocumentsInPlace -bool true "$APP/Info.plist"
-SPECS=$(python3 -I "$P/tools/make_hook_patch.py" "$BIN")
+SPECS="$(python3 -I "$P/tools/make_hook_patch.py" "$BIN") $(python3 -I "$P/tools/make_slow_patch.py" "$BIN")"; SPECS=$(echo $SPECS)
 if [ -n "$SPECS" ]; then "$P/tools/apply_container.sh" $SPECS; else codesign -f -s - --entitlements "$P/backup/ent.plist" "$APP"; echo "no code diff; resigned"; fi
 echo "dylib applied"

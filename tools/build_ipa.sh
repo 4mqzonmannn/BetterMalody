@@ -2,10 +2,10 @@
 # 実機(iPhone)向けの BetterMalody.ipa を、元 IPA(orig/Malody_Mobile_4.3.7.ipa)から作る。
 #   バイナリのコードパッチ(灰色 / 保存値丸め解除 / 分割メニュー / フック)+ dylib(iOS プラットフォーム化)+ skin 差し替え + アプリ名・バンドル ID の書き換え。
 #   署名は ad-hoc(配布先の Sideloadly / AltStore などが自分の証明書で署名し直す)。
-# 使い方: tools/build_ipa.sh [出力 IPA パス(既定 build/BetterMalody-4.3.7-bm1.ipa)]
+# 使い方: tools/build_ipa.sh [出力 IPA パス(既定 build/BetterMalody-4.3.7-bm2.ipa)]
 set -euo pipefail
 P="$(cd "$(dirname "$0")/.." && pwd)"
-OUT="${1:-$P/build/BetterMalody-4.3.7-bm1.ipa}"
+OUT="${1:-$P/build/BetterMalody-4.3.7-bm2.ipa}"
 BUNDLE_ID="me.bettermalody.m"
 APP_NAME="BetterMalody"
 ST="$P/build/stage"
@@ -19,6 +19,7 @@ patch() { local T; T=$(mktemp "$ST/tmp.XXXXXX"); python3 -I "$P/tools/patch_byte
 patch $(python3 -I "$P/tools/make_gray_patch.py" "$BIN" 0.75) 0x100074630=1f410071:f803082a 0x100074634=69000054:12000014
 SPECS=$(python3 -I "$P/tools/make_divide_patch.py" "$BIN"); [ -z "$SPECS" ] || patch $SPECS
 SPECS=$(python3 -I "$P/tools/make_hook_patch.py" "$BIN");   [ -z "$SPECS" ] || patch $SPECS
+SPECS=$(python3 -I "$P/tools/make_slow_patch.py" "$BIN");   [ -z "$SPECS" ] || patch $SPECS   # スロー再生の下限 0.5 → 0.125
 
 # 2) skin(分割メニュー → FX → 設定 → モジュール → Taiko の順に拡張)
 W="$P/build/skin"; rm -rf "$W"; mkdir -p "$W"

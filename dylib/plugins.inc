@@ -1944,7 +1944,7 @@ static void pl_right_fill(void) {
         void *l1 = ((void *(*)(float))VA(0x1001F3608ULL))(fontH);
         BOOL on = gPlSess && gPlSessIdx == (NSInteger)i && gPlSessEd == ed;
         NSString *base = [NSString stringWithUTF8String:in->name] ?: @"";
-        if (base.length > 14) base = [[base substringToIndex:13] stringByAppendingString:@"…"];
+        if (base.length > 9) base = [[base substringToIndex:8] stringByAppendingString:@"…"];
         NSString *nm = on ? [base stringByAppendingString:@" [ON]"] : base;
         set_label_text(l1, nm.UTF8String);
         float p1[2] = { ix + rowH * 0.5f, rowH * 0.5f };
@@ -2023,14 +2023,14 @@ static void pl_lane_shrink(void *ed, BOOL on) {
     }
     float u = H0 / 720.0f;
     float *szL = VT(gPlRList, 328, float *(*)(void *))(gPlRList);
-    float *szB = VT(gPlShrink.n[4], 328, float *(*)(void *))(gPlShrink.n[4]);
-    float listLeft = W - szB[0] - 6 * u - szL[0] - 8 * u;
+    VT(gPlRBox, 184, void (*)(void *, float))(gPlRBox, cx);                               // 一覧はレーンの左端に置き(左の拍番号 / 波形の列に重ねない)、レーンを右へ縮めて場所を空ける
+    float listRight = cx + szL[0] + 8 * u;
     float x1;
     if (!lay_of(ed)->slide) {
         int cnt = e[1700]; if (cnt < 1) cnt = 1;
         x1 = cx + LF(ed, 1632 + 4 * (cnt - 1)) + LF(ed, 1672);
     } else x1 = cx + LF(ed, 1696);
-    float s = (listLeft - cx) / (x1 - cx);
+    float s = (x1 - listRight) / (x1 - cx);        // 縮小の基準点はレーンの右端(左の一覧側へ詰めるため、右端を固定して縮める)
     if (!(s < 0.98f)) return;                      // 重ならないなら何もしない
     if (s < 0.4f) s = 0.4f;
     // 縮める対象 = エディタ直下のノードのうち、レーン領域(左端 x = cx、幅 ≒ レーンの幅)を占めるもの
@@ -2048,16 +2048,16 @@ static void pl_lane_shrink(void *ed, BOOL on) {
             if (fabsf(px - cx) < 2.0f && w > lw * 0.9f && w < lw * 1.1f) gPlShrink.t[gPlShrink.cnt++] = c;
         }
     }
-    gPlShrink.s = s; gPlShrink.cx = cx; gPlShrink.listLeft = listLeft;
+    gPlShrink.s = s; gPlShrink.cx = x1; gPlShrink.listLeft = listRight;   // cx = 縮小の基準点(右端)/ listLeft = 一覧の右端
     gPlShrink.contScaled = NO;
     for (int i = 0; i < gPlShrink.cnt; i++) if (gPlShrink.t[i] == cont) gPlShrink.contScaled = YES;
-    os_log(L, "lane shrink: s=%.3f targets=%d cx=%.1f x1=%.1f listLeft=%.1f", s, gPlShrink.cnt, cx, x1, listLeft);
+    os_log(L, "lane shrink: s=%.3f targets=%d cx=%.1f x1=%.1f listRight=%.1f", s, gPlShrink.cnt, cx, x1, listRight);
     for (int i = 0; i < gPlShrink.cnt; i++) {
         void *n = gPlShrink.t[i];
         float bx = VT(n, 192, float (*)(void *))(n), by = VT(n, 208, float (*)(void *))(n);
         gPlShrink.px[i] = bx;
         gPlShrink.sx[i] = *(float *)((uint8_t *)n + 64);
-        float p[2] = { cx + s * (bx - cx), by };
+        float p[2] = { x1 + s * (bx - x1), by };
         VT(n, 136, void (*)(void *, float *))(n, p);
         *(float *)((uint8_t *)n + 64) = gPlShrink.sx[i] * s;
         uint8_t *b = (uint8_t *)n;
@@ -2080,20 +2080,20 @@ static void pl_right_set(BOOL on) {
 static void pl_right_toggle(void) { pl_right_set(!gPlROn); }
 // 縮小中のタッチ座標: 見た目が縮んでいるだけなので、標準の処理(選択・配置・投げ縄・プラグイン)へ渡す前に元の座標系へ戻す。
 // 一覧の領域(縮んだレーンの右)へのタッチは標準の処理へ渡さない(一覧のスクロール・タップのため)。1 = 標準の処理を飛ばす
-static float pl_list_left(void *ed) {      // 一覧の左端(エディタ座標)。縮小しない幅でも、一覧上のタッチを標準の処理(選択解除など)へ渡さないために使う
+static float pl_list_left(void *ed) {      // 一覧の右端(エディタ座標。名前は旧仕様の名残)。縮小しない幅でも、一覧上のタッチを標準の処理(選択解除など)へ渡さないために使う
     if (gPlShrink.applied) return gPlShrink.listLeft;
-    if (!gPlRList || !gPlShrink.n[4]) return 1e9f;
-    float W = LF(ed, 664), u = LF(ed, 128) / 720.0f;
-    float *szL = VT(gPlRList, 328, float *(*)(void *))(gPlRList), *szB = VT(gPlShrink.n[4], 328, float *(*)(void *))(gPlShrink.n[4]);
-    return W - szB[0] - 6 * u - szL[0] - 8 * u;
+    if (!gPlRList || !gPlRBox) return -1e9f;
+    float u = LF(ed, 128) / 720.0f;
+    float *szL = VT(gPlRList, 328, float *(*)(void *))(gPlRList);
+    return VT(gPlRBox, 192, float (*)(void *))(gPlRBox) + szL[0] + 8 * u;
 }
 static float gPlMapOrigX; static BOOL gPlMapped;
 static int pl_right_lane_map(void *ed, void *pos) {
     gPlMapped = NO;
-    if (gPlROn && pos && ed == gPl.editor && !gPlShrink.applied && ((float *)pos)[0] >= pl_list_left(ed)) return 1;
+    if (gPlROn && pos && ed == gPl.editor && !gPlShrink.applied && ((float *)pos)[0] <= pl_list_left(ed)) return 1;
     if (!pos || !gPlShrink.applied || ed != gPl.editor) return 0;
     float *pt = (float *)pos;
-    if (pt[0] >= gPlShrink.listLeft) return 1;
+    if (pt[0] <= gPlShrink.listLeft) return 1;
     gPlMapOrigX = pt[0]; gPlMapped = YES;
     pt[0] = gPlShrink.cx + (pt[0] - gPlShrink.cx) / gPlShrink.s;
     return 0;

@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+"""設定画面(script_config.mui)の改善:
+ - Audio の先頭に「Master Volume」スライダー(_area1-7, tag 90/96/97)
+ - 各スライダーの値に単位(% / ms / °)と、値をタップして数値を手入力する当たり判定(tag 80〜85)
+ - 手入力の小パネル(_cfgp: 入力欄 tag 94 / OK 91 / Cancel 92 / 背景 99)
+ - 項目の並べ替え(Gameplay / Graphics)
+使い方: python3 -I build_skin_cfg.py <入力skin-ios.bin> <出力skin-ios.bin>"""
+import sys, os, hashlib
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import skinpkg
+KEY = hashlib.sha1(b"script_config.mui").hexdigest()
+
+# --- 並べ替え / 行の追加 ---
+AREA1_OLD = "_title-1\n_line-1\n_area1-[1-6]\n    parent=_list\n    size=100%,90\n"
+AREA1_NEW = ("_title-1\n_line-1\n_area1-7\n_area1-[1-6]\n    parent=_list\n    size=100%,90\n"
+             "_area1-7\n    parent=_list\n    size=100%,90\n")
+AREA2_OLD = "_area2-[1-8]\n"
+AREA2_NEW = "_area2-[1,2,6,7,3,5,4,8]\n"            # Offset x2 / 3D column / angle / DJ disk / fullwidth / storyboard / portrait
+AREA3_OLD = "_area3-[1,5,3,7,6,4,2]\n"
+AREA3_NEW = "_area3-[4,2,3,7,1,5,6]\n"              # Language / Skin / Original title / Grid mode / FPS(, 非表示の 2 つ)
+
+# スライダー番号 -> (所属 area, 単位)。1..5 は元のスライダー、6 が Master
+SLIDERS = {1: ("_area1-1", "%"), 2: ("_area1-2", "%"), 3: ("_area2-1", "ms"),
+           4: ("_area2-2", "ms"), 5: ("_area2-7", "°"), 6: ("_area1-7", "%")}
+
+def block():
+    L = []
+    # Master Volume の行
+    L += ["_label-32", "    type=1", "    fsize={f2}", "    anchor=3", "    pos=87,45", "    text=Master Volume", "    parent=_area1-7",
+          "_slidebg-6", "    type=4", "    tex=ui-setting-bg0.png", "    part=24,86", "    size={slide_w},47", "    anchor=6",
+          "    pos={right_x},22", "    zindex=3", "    etag=107", "    parent=_area1-7", "    tag=90",
+          "_slide-6", "    type=106", "    tex=ui-setting-bg1.png", "    size={slide_w},47", "    anchor=6",
+          "    pos=_slidebg-6 0,0", "    zindex=2", "    parent=_area1-7", "    tag=96",
+          "_slidestr-6", "    type=1", "    fsize={f2}", "    anchor=4", "    pos={slide_x},45", "    zindex=4",
+          "    text=100", "    parent=_area1-7", "    tag=97"]
+    # 値の単位 と 手入力の当たり判定
+    for n, (area, unit) in SLIDERS.items():
+        L += [f"_slideunit-{n}", "    type=1", "    fsize={f2}", "    anchor=3", "    pos={slide_x}+52,45", "    zindex=4",
+              f"    text={unit}", f"    parent={area}",
+              f"_slidehit-{n}", "    type=2", "    color=#ffffff", "    opacity=1", "    size=200,64", "    anchor=4",
+              "    pos={slide_x}+30,45", "    zindex=6", "    etag=107", f"    parent={area}", f"    tag={79 + n}"]
+    # 数値入力パネル(中央のモーダル)
+    L += ["_cfgp", "    size=100%,100%", "    anchor=6", "    pos=0,0", "    zindex=200", "    etag=107", "    tag=99", "    show=0",
+          "_cfgpdim", "    type=2", "    color=#000000", "    opacity=140", "    size=100%,100%", "    anchor=6", "    pos=0,0",
+          "    parent=_cfgp", "    etag=107", "    tag=99",
+          "_cfgpbg", "    type=5", "    tex=g-rightbg.png", "    rect=20px,144px,40px,80px", "    size=900,380",
+          "    size2=0,1080px", "    anchor=4", "    pos=50%,50%", "    parent=_cfgp", "    etag=-2",
+          "_cfgpt", "    type=1", "    fsize={f2}", "    anchor=4", "    pos=50%,50%+110", "    zindex=2", "    parent=_cfgp", "    tag=93",
+          "    text=Value",
+          "_cfgpin", "    type=4", "    tex=g-input.png", "    part=10,50", "    parent=_cfgp", "    size=420,64", "    anchor=4",
+          "    pos=50%,50%+10", "    zindex=2", "    etag=107", "    tag=94",
+          "_cfgpit", "    type=105", "    fsize=32", "    size=410,64", "    tex=g-inputbar.png", "    size2=0,35", "    anchor=3",
+          "    pos=5,32", "    zindex=2", "    etag=107", "    parent=_cfgpin", "    tag=94",
+          "_cfgpok", "    type=4", "    tex=g-dialogbtn.png", "    tex2=g-dialogbtn2.png", "    part=7,46", "    parent=_cfgp",
+          "    size=220,62", "    anchor=4", "    pos=50%-130,50%-100", "    zindex=2", "    etag=107", "    tag=91",
+          "_cfgpcancel", "    type=4", "    tex=g-dialogbtn.png", "    tex2=g-dialogbtn2.png", "    part=7,46", "    parent=_cfgp",
+          "    size=220,62", "    anchor=4", "    pos=50%+130,50%-100", "    zindex=2", "    etag=107", "    tag=92",
+          "_cfgpokhit", "    type=2", "    color=#ffffff", "    opacity=1", "    size=320,100", "    anchor=4", "    parent=_cfgp",
+          "    pos=50%-130,50%-100", "    zindex=3", "    etag=107", "    tag=91",
+          "_cfgpcanhit", "    type=2", "    color=#ffffff", "    opacity=1", "    size=320,100", "    anchor=4", "    parent=_cfgp",
+          "    pos=50%+130,50%-100", "    zindex=3", "    etag=107", "    tag=92",
+          "_cfgpoki", "    type=1", "    fsize={f2}", "    anchor=4", "    pos=110,31", "    parent=_cfgpok", "    text=OK",
+          "_cfgpcani", "    type=1", "    fsize={f2}", "    anchor=4", "    pos=110,31", "    parent=_cfgpcancel", "    text=Cancel",
+          "@if <1.44", "_slide-6", "    tex=ui-setting-bg2.png", "@endif"]
+    return "\n".join(L) + "\n"
+
+def main():
+    d = open(sys.argv[1], "rb").read()
+    _, _, ents = skinpkg.parse(d)
+    e = [x for x in ents if x["key"] == KEY][0]
+    text = d[e["data"]:e["data"] + e["size"]].decode("utf-8")
+    for old, new in ((AREA1_OLD, AREA1_NEW), (AREA2_OLD, AREA2_NEW), (AREA3_OLD, AREA3_NEW)):
+        assert old in text, old
+        text = text.replace(old, new, 1)
+    text = text.rstrip("\n") + "\n" + block()
+    out = skinpkg.replace(d, KEY, text.encode("utf-8"))
+    open(sys.argv[2], "wb").write(out)
+    print("config layout %d -> %d" % (e["size"], len(text.encode("utf-8"))))
+
+if __name__ == "__main__":
+    main()

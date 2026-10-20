@@ -1,0 +1,583 @@
+#!/usr/bin/env python3
+"""FX: エディタ左上のズームボタン列(_btn-6/7)の下に「FX」ボタン(tag=700)を追加する。
+入力 skin は分割メニュー適用後のものを想定(元からでも可)。
+使い方: python3 -I build_skin_fx.py <入力skin-ios.bin> <出力skin-ios.bin>"""
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import skinpkg
+KEY = "3cb1cc2da3dbc808db136e18ea9679aad447e442"
+
+RB_OLD = "_right-icon-7\n    tex=ui-edit-icon6.png\n    tag=17\n"
+RB_NEW = """_right-icon-[8,9]
+    size=0,{rightH}
+    anchor=4
+    parent=_right-1
+    etag=104
+    react={rightRH},{rightRW}
+_right-icon-8
+    tex=bm-undo.png
+    pos={rightX},{rightT}+{rightP}+{rightP}
+    tag=770
+_right-icon-9
+    tex=bm-redo.png
+    pos={rightX},{rightT}+{rightP}+{rightP}+{rightP}
+    tag=771
+"""
+R3_OLD = "_right-icon3-9\n    tex=ui-edit-icon6.png\n    pos={rightX},{rightT}+{rightP}\n    tag=17\n"
+R2_OLD = "_right-icon2-6\n    tex=ui-edit-icon18.png\n    tag=14\n"
+def _ur(n, parent, i_undo, i_redo, show):
+    sh = "    show=1\n" if show else ""
+    return f"""_right-icon{n}-[{i_undo},{i_redo}]
+    size=0,{{rightH}}
+    anchor=4
+    parent={parent}
+    etag=104
+    react={{rightRH}},{{rightRW}}
+{sh}_right-icon{n}-{i_undo}
+    tex=bm-undo.png
+    pos={{rightX}},{{rightT}}+{{rightP}}+{{rightP}}
+    tag=770
+_right-icon{n}-{i_redo}
+    tex=bm-redo.png
+    pos={{rightX}},{{rightT}}+{{rightP}}+{{rightP}}+{{rightP}}
+    tag=771
+"""
+R3_PL = """_plr
+    size=190,100%-{rightT}-{rightT}
+    anchor=5
+    pos=100%-{rightW}-6,50%
+    zindex=45
+    show=0
+_right-pl
+    type=101
+    size=190,100%-{rightT}-{rightT}
+    size2=0,6
+    anchor=6
+    pos=0,0
+    parent=_plr
+    zindex=2
+    etag=104
+_right-icon3-12
+    tex=bm-plugin.png
+    size=0,{rightH}
+    anchor=4
+    parent=_right-3
+    etag=104
+    show=1
+    react={rightRH},{rightRW}
+    pos={rightX},{rightT}+{rightP}+{rightP}+{rightP}+{rightP}
+    tag=772
+_right-tip3-12
+    type=109
+    fsize={rightF}
+    anchor=5
+    parent=_righttip-3
+    text=Plugins
+    pos=-10,{rightT}+{rightP}+{rightP}+{rightP}+{rightP}
+"""
+R3_NEW = _ur(3, "_right-3", 10, 11, True) + R3_PL
+R2_NEW = _ur(2, "_right-2", 7, 8, False)
+RT_OLD = "_right-tip-7\n    text=Divide\n    pos=-10,{rightT}\n"
+RT_NEW = """_right-tip-[8,9]
+    type=109
+    fsize={rightF}
+    anchor=5
+    parent=_righttip-1
+_right-tip-8
+    text=Undo
+    pos=-10,{rightT}+{rightP}+{rightP}
+_right-tip-9
+    text=Redo
+    pos=-10,{rightT}+{rightP}+{rightP}+{rightP}
+"""
+A1 = "_btnicon-7\n    parent=_btn-7\n"
+BLOCK = """_btn-8
+    tex=ui-edit-bg1.png
+    size=0,40
+    anchor=3
+    pos=0,100%-160
+    zindex=40
+    etag=104
+    tag=700
+_btnicon-8
+    type=1
+    text=FX
+    fsize=18
+    color=#FFFFFF
+    parent=_btn-8
+    anchor=4
+    pos=15,20
+"""
+A2 = "_btnicon-[6,7]\n    pos=17,24\n"
+PHONE = """_btn-8
+    size=0,50
+    pos=0,100%-200
+_btnicon-8
+    fsize=22
+    pos=17,24
+"""
+
+# ---- Effect パネル(既存の BPM リスト _bpmpanel を複製した構造) ----
+FXPANEL = """
+_fxpanel
+    size=100%,100%
+    anchor=6
+    pos=0,0
+    zindex=51
+    etag=104
+    tag=38
+    show=0
+_fxbg
+    type=5
+    tex=g-rightbg.png
+    rect=20px,144px,40px,80px
+    size2=0,1080px
+    anchor=5
+    size={panelW},100%-40
+    pos=100%,50%
+    parent=_fxpanel
+    etag=-2
+_fxtext-[1-4]
+    type=1
+    fsize={panelF}
+    anchor=6
+    parent=_fxpanel
+_fxtext-1
+    text=Effect list
+    pos={up_x}+30,630
+_fxlistbg
+    type=2
+    color=#000000
+    opacity=20
+    size={listW},330
+    anchor=0
+    pos={up_x}+30,630
+    parent=_fxpanel
+_fxlist
+    type=101
+    size={listW},330
+    anchor=0
+    pos={up_x}+30,630
+    parent=_fxpanel
+    zindex=2
+    etag=104
+_fxtext-2
+    text=Beat
+    pos={up_x}+30,240
+_fxtext-3
+    text=1:1/4
+    pos={up_x}+200,240
+_fxtext-4
+    text=Type
+    pos={up_x}+30,185
+_fxtext-5
+    type=1
+    fsize={panelF}
+    anchor=6
+    parent=_fxpanel
+    text=Value
+    pos={up_x}+30,130
+_fxkind
+    type=4
+    tex=g-dialogbtn.png
+    tex2=g-dialogbtn2.png
+    part=7,46
+    parent=_fxpanel
+    anchor=6
+    size=150,40
+    pos={up_x}+200,175
+    etag=104
+    tag=317
+_fxicon-4
+    type=1
+    fsize=24
+    anchor=4
+    pos=75,20
+    parent=_fxkind
+    text=Scroll
+_fxe-1
+    type=4
+    tex=g-input.png
+    part=10,50
+    parent=_fxpanel
+    size=150,40
+    anchor=6
+    pos={up_x}+200,120
+    etag=104
+    tag=313
+_fxet-1
+    type=105
+    fsize=24
+    size=140,40
+    tex=g-inputbar.png
+    size2=0,35
+    anchor=3
+    pos=5,20
+    zindex=2
+    etag=104
+    parent=_fxe-1
+    tag=313
+_fxb-[1-2]
+    type=4
+    tex=g-dialogbtn.png
+    tex2=g-dialogbtn2.png
+    part=7,46
+    parent=_fxpanel
+    anchor=0
+    size=150,40
+    etag=104
+_fxb-1
+    pos={up_x}+30,60
+    tag=310
+_fxb-2
+    pos={up_x}+200,60
+    tag=311
+_fxicon-[1-2]
+    type=1
+    fsize=24
+    anchor=4
+    pos=75,20
+_fxicon-1
+    parent=_fxb-1
+    text=Apply
+_fxicon-2
+    parent=_fxb-2
+    text=Remove
+"""
+FXPANEL_PHONE = """
+_fxlistbg
+    size={listW},250
+_fxlist
+    size={listW},250
+_fxtext-2
+    pos={up_x}+30,330
+_fxtext-3
+    pos={up_x}+240,330
+_fxtext-4
+    pos={up_x}+30,255
+_fxtext-5
+    pos={up_x}+30,175
+_fxkind
+    size=230,60
+    pos={up_x}+240,240
+_fxicon-4
+    fsize=35
+    pos=115,30
+_fxe-1
+    size=230,60
+    pos={up_x}+240,160
+_fxet-1
+    fsize=40
+    size=200,60
+    size2=0,50
+    pos=10,32
+_fxb-[1-2]
+    size=230,60
+_fxb-1
+    pos={up_x}+30,110
+_fxb-2
+    pos={up_x}+290,110
+_fxicon-[1-2]
+    fsize=35
+    pos=115,30
+"""
+PLPANEL = """
+_plpanel
+    size=100%,100%
+    anchor=6
+    pos=0,0
+    zindex=51
+    etag=104
+    tag=38
+    show=0
+_plbg
+    type=5
+    tex=g-rightbg.png
+    rect=20px,144px,40px,80px
+    size2=0,1080px
+    anchor=5
+    size={panelW},100%-40
+    pos=100%,50%
+    parent=_plpanel
+    etag=-2
+_pltext-[1-3]
+    type=1
+    fsize={panelF}
+    anchor=6
+    parent=_plpanel
+_pltext-3
+    text=Input: (none)
+    pos={up_x}+30,190
+_pltext-1
+    text=Plugins (Lua)
+    pos={up_x}+30,630
+_pltext-2
+    text=Documents/Plugins
+    pos={up_x}+30,240
+_pllistbg
+    type=2
+    color=#000000
+    opacity=20
+    size={listW},330
+    anchor=0
+    pos={up_x}+30,630
+    parent=_plpanel
+_pllist
+    type=101
+    size={listW},330
+    anchor=0
+    pos={up_x}+30,630
+    parent=_plpanel
+    zindex=2
+    etag=104
+_plb-[1-3]
+    type=4
+    tex=g-dialogbtn.png
+    tex2=g-dialogbtn2.png
+    part=7,46
+    parent=_plpanel
+    anchor=0
+    size=150,40
+    etag=104
+_plb-1
+    pos={up_x}+30,60
+    tag=330
+_plb-2
+    pos={up_x}+200,60
+    tag=332
+_plb-3
+    anchor=6
+    size=120,40
+    pos={up_x}+230,130
+    tag=333
+_plie-1
+    type=4
+    tex=g-input.png
+    part=10,50
+    parent=_plpanel
+    size=190,40
+    anchor=6
+    pos={up_x}+30,130
+    etag=104
+    tag=334
+_plit-1
+    type=105
+    fsize=24
+    size=180,40
+    tex=g-inputbar.png
+    size2=0,35
+    anchor=3
+    pos=5,20
+    zindex=2
+    etag=104
+    parent=_plie-1
+    tag=334
+_plicon-[1-3]
+    type=1
+    fsize=24
+    anchor=4
+    pos=75,20
+_plicon-3
+    parent=_plb-3
+    text=OK
+    pos=60,20
+_plc-[1-4]
+    type=4
+    tex=g-dialogbtn.png
+    tex2=g-dialogbtn2.png
+    part=7,46
+    parent=_plpanel
+    anchor=0
+    size=150,40
+    etag=104
+    show=0
+_plc-1
+    pos={up_x}+30,165
+    tag=335
+_plc-2
+    pos={up_x}+200,165
+    tag=336
+_plc-3
+    pos={up_x}+30,117
+    tag=337
+_plc-4
+    pos={up_x}+200,117
+    tag=338
+_plcicon-[1-4]
+    type=1
+    fsize=24
+    anchor=4
+    pos=75,20
+_plcicon-1
+    parent=_plc-1
+    text=-
+_plcicon-2
+    parent=_plc-2
+    text=-
+_plcicon-3
+    parent=_plc-3
+    text=-
+_plcicon-4
+    parent=_plc-4
+    text=-
+_plicon-1
+    parent=_plb-1
+    text=Run
+_plicon-2
+    parent=_plb-2
+    text=Import
+"""
+SPPANEL = """
+_sdpanel
+    size=100%,100%
+    anchor=6
+    pos=0,0
+    zindex=60
+    etag=104
+    tag=38
+    show=0
+_sddim
+    type=2
+    color=#000000
+    opacity=45
+    size=100%,100%
+    anchor=6
+    pos=0,0
+    parent=_sdpanel
+    etag=104
+    tag=38
+_sdbg
+    type=5
+    tex=g-rightbg.png
+    rect=20px,144px,40px,80px
+    size=760,300
+    size2=0,1080px
+    anchor=4
+    pos=50%,50%
+    parent=_sdpanel
+    etag=-2
+_sdlabel-[1-2]
+    type=1
+    fsize=24
+    anchor=5
+    pos=50%-130,50%+70$-80
+    zindex=62
+    parent=_sdpanel
+_sdbarbg-[1-2]
+    type=4
+    tex=ui-setting-bg0.png
+    part=24,86
+    size=420,47
+    anchor=3
+    pos=50%-110,50%+70$-80
+    zindex=63
+    etag=104
+    tag=342$1
+    parent=_sdpanel
+_sdbar-[1-2]
+    type=106
+    tex=ui-setting-bg2.png
+    size=420,47
+    anchor=3
+    pos=50%-110,50%+70$-80
+    zindex=62
+    parent=_sdpanel
+_sdstr-[1-2]
+    type=1
+    fsize=28
+    text=0
+    anchor=4
+    pos=50%+100,50%+70$-80
+    zindex=64
+    parent=_sdpanel
+_sdbtn-[1-2]
+    type=4
+    tex=g-dialogbtn.png
+    tex2=g-dialogbtn2.png
+    part=7,46
+    size=200,56
+    anchor=4
+    pos=50%-110$220,50%-100
+    hover=g-dialogbtn2.png
+    leave=g-dialogbtn.png
+    etag=104
+    tag=344$1
+    zindex=62
+    parent=_sdpanel
+_sdbtnstr-[1-2]
+    type=1
+    fsize=26
+    anchor=4
+    pos=100,28
+_sdbtnstr-1
+    parent=_sdbtn-1
+    text=OK
+_sdbtnstr-2
+    parent=_sdbtn-2
+    text=Cancel
+"""
+SPPANEL_PHONE = """"""
+PLPANEL_PHONE = """
+_pllistbg
+    size={listW},250
+_pllist
+    size={listW},250
+_pltext-2
+    pos={up_x}+30,330
+_pltext-3
+    pos={up_x}+30,285
+_plb-[1-3]
+    size=230,60
+_plb-1
+    pos={up_x}+30,110
+_plb-2
+    pos={up_x}+290,110
+_plb-3
+    size=230,60
+    pos={up_x}+290,205
+_plie-1
+    size=260,60
+    pos={up_x}+30,205
+_plit-1
+    fsize=40
+    size=230,60
+    size2=0,50
+    pos=10,32
+_plicon-[1-3]
+    fsize=35
+    pos=115,30
+_plc-[1-4]
+    size=230,60
+_plc-1
+    pos={up_x}+30,265
+_plc-2
+    pos={up_x}+290,265
+_plc-3
+    pos={up_x}+30,195
+_plc-4
+    pos={up_x}+290,195
+_plcicon-[1-4]
+    fsize=35
+    pos=115,30
+"""
+A3 = "_bpmicon-3\n    parent=_bpmb-3\n    text=Add\n"
+A4 = "_bpmicon-[2,3]\n    fsize=35\n    pos=125,30\n"
+
+def main():
+    d = open(sys.argv[1], "rb").read()
+    _, _, ents = skinpkg.parse(d)
+    e = [x for x in ents if x["key"] == KEY][0]
+    text = d[e["data"]:e["data"] + e["size"]].decode("utf-8")
+    assert "_btn-8" not in text, "already patched"
+    assert text.count(A1) == 1 and text.count(A2) == 1, (text.count(A1), text.count(A2))
+    assert text.count(A3) == 1 and text.count(A4) == 1, (text.count(A3), text.count(A4))
+    assert text.count(RB_OLD) == 1 and text.count(RT_OLD) == 1, (text.count(RB_OLD), text.count(RT_OLD))
+    assert text.count(R3_OLD) == 1 and text.count(R2_OLD) == 1, (text.count(R3_OLD), text.count(R2_OLD))
+    text = text.replace(R3_OLD, R3_OLD + R3_NEW, 1).replace(R2_OLD, R2_OLD + R2_NEW, 1)
+    text = text.replace(RB_OLD, RB_OLD + RB_NEW, 1).replace(RT_OLD, RT_OLD + RT_NEW, 1)
+    text = text.replace(A1, A1 + BLOCK, 1).replace(A2, A2 + PHONE, 1)
+    text = text.replace(A3, A3 + FXPANEL + PLPANEL + SPPANEL, 1).replace(A4, A4 + FXPANEL_PHONE + PLPANEL_PHONE + SPPANEL_PHONE, 1)
+    out = skinpkg.replace(d, KEY, text.encode("utf-8"))
+    open(sys.argv[2], "wb").write(out)
+    print("fx button added", len(d), "->", len(out))
+main()

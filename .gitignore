@@ -1,0 +1,10 @@
+# 元 IPA・展開物・作業ファイル・バックアップ・生成物はリポジトリに含めない
+orig/
+work/
+backup/
+build/
+dylib/BetterMalody.dylib
+dylib/third_party/lua/lua.tar.gz
+*.log
+.DS_Store
+__pycache__/

@@ -2,10 +2,10 @@
 # 実機(iPhone)向けの BetterMalody.ipa を、元 IPA(orig/Malody_Mobile_4.3.7.ipa)から作る。
 #   バイナリのコードパッチ(灰色 / 保存値丸め解除 / 分割メニュー / フック)+ dylib(iOS プラットフォーム化)+ skin 差し替え + アプリ名・バンドル ID の書き換え。
 #   署名は ad-hoc(配布先の Sideloadly / AltStore などが自分の証明書で署名し直す)。
-# 使い方: tools/build_ipa.sh [出力 IPA パス(既定 build/BetterMalody-4.3.7-bm3.ipa)]
+# 使い方: tools/build_ipa.sh [出力 IPA パス(既定 build/BetterMalody_v1.0.3.ipa)]
 set -euo pipefail
 P="$(cd "$(dirname "$0")/.." && pwd)"
-OUT="${1:-$P/build/BetterMalody-4.3.7-bm3.ipa}"
+OUT="${1:-$P/build/BetterMalody_v1.0.3.ipa}"
 BUNDLE_ID="me.bettermalody.m"
 APP_NAME="BetterMalody"
 ST="$P/build/stage"

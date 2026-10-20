@@ -1189,6 +1189,52 @@ static void pl_dialog_show(void) {
     NSArray *items = @[ [NSString stringWithFormat:@"OK  (%@)", v], @"+1", @"-1", @"+10", @"-10", @"+100", @"-100", @"Keyboard..." ];
     pl_dlg_open(scene, [NSString stringWithFormat:@"%@: %@", title, v], items, 300, pl_dlg_cb);
 }
+// 文字入力(GetUserInput): iOS 標準の入力ウィンドウ(UIAlertController + テキスト欄、標準キーボード)で受ける。Malody V と同じ作法。
+// 確定 = 先頭の要求のコールバックへ文字列 / キャンセル = nil。パネルは開かない
+static void pl_input_commit(void *ed, NSString *txt);
+static BOOL gPlNativeOn, gPlNativeFail;     // Fail = 標準の入力ウィンドウを出せなかった(以降はパネルの入力欄)
+static void pl_native_input(NSDictionary *h) {
+    if (gPlNativeOn) return;
+    @try {
+        Class cAC = NSClassFromString(@"UIAlertController"), cAA = NSClassFromString(@"UIAlertAction");
+        id app = [(id)NSClassFromString(@"UIApplication") valueForKey:@"sharedApplication"];
+        id vc = [[app valueForKey:@"keyWindow"] valueForKey:@"rootViewController"];
+        if (!cAC || !cAA || !vc) { gPlNativeFail = YES; dispatch_async(dispatch_get_main_queue(), ^{ pl_input_show(); }); return; }
+        while ([vc valueForKey:@"presentedViewController"]) vc = [vc valueForKey:@"presentedViewController"];
+        NSString *title = [h[@"t"] length] ? h[@"t"] : @"Input";
+        NSString *def = gPlKbPreset ?: h[@"d"] ?: @"";
+        gPlKbPreset = nil;
+        id ac = ((id (*)(id, SEL, id, id, NSInteger))objc_msgSend)((id)cAC, NSSelectorFromString(@"alertControllerWithTitle:message:preferredStyle:"), title, nil, 1);
+        __block id field = nil;
+        void (^cfg)(id) = ^(id tf) {
+            field = tf;
+            [tf setValue:def forKey:@"text"];
+            ((void (*)(id, SEL, NSInteger))objc_msgSend)(tf, NSSelectorFromString(@"setClearButtonMode:"), 1);      // 編集中だけ消去ボタン
+            ((void (*)(id, SEL, NSInteger))objc_msgSend)(tf, NSSelectorFromString(@"setAutocorrectionType:"), 1);   // 1 = 無効
+            ((void (*)(id, SEL, NSInteger))objc_msgSend)(tf, NSSelectorFromString(@"setAutocapitalizationType:"), 0);
+        };
+        ((void (*)(id, SEL, id))objc_msgSend)(ac, NSSelectorFromString(@"addTextFieldWithConfigurationHandler:"), cfg);
+        SEL mk = NSSelectorFromString(@"actionWithTitle:style:handler:");
+        void (^onCancel)(id) = ^(id a) { gPlNativeOn = NO; pl_input_commit(gPl.editor ?: gEditor, nil); if (gPlInQ.count) dispatch_async(dispatch_get_main_queue(), ^{ pl_input_show(); }); };
+        void (^onOk)(id) = ^(id a) {
+            NSString *t = [field valueForKey:@"text"] ?: @"";
+            gPlNativeOn = NO;
+            pl_input_commit(gPl.editor ?: gEditor, t);
+            if (gPlInQ.count) dispatch_async(dispatch_get_main_queue(), ^{ pl_input_show(); });
+        };
+        id aCancel = ((id (*)(id, SEL, id, NSInteger, id))objc_msgSend)((id)cAA, mk, @"キャンセル", 1, onCancel);
+        id aOk = ((id (*)(id, SEL, id, NSInteger, id))objc_msgSend)((id)cAA, mk, @"確認", 0, onOk);
+        ((void (*)(id, SEL, id))objc_msgSend)(ac, NSSelectorFromString(@"addAction:"), aCancel);
+        ((void (*)(id, SEL, id))objc_msgSend)(ac, NSSelectorFromString(@"addAction:"), aOk);
+        [ac setValue:aOk forKey:@"preferredAction"];
+        gPlNativeOn = YES;
+        ((void (*)(id, SEL, id, BOOL, id))objc_msgSend)(vc, NSSelectorFromString(@"presentViewController:animated:completion:"), ac, YES, nil);
+    } @catch (NSException *ex) {
+        gPlNativeOn = NO; gPlNativeFail = YES;
+        os_log(L, "plugin: native input exception %{public}@", ex.reason);
+        dispatch_async(dispatch_get_main_queue(), ^{ pl_input_show(); });
+    }
+}
 static void pl_input_show(void) {
     if (gPlInQ.count) {                                      // 選択肢と数値入力はダイアログ
         NSDictionary *h = gPlInQ[0];
@@ -1198,6 +1244,7 @@ static void pl_input_show(void) {
             double v;
             if (hid != gPlStepId) { gPlStepId = hid; gPlStepKb = [h[@"kb"] boolValue]; gPlStepVal = 0; if (!gPlStepKb) { if (pl_numeric(h[@"d"], &v)) gPlStepVal = v; else gPlStepKb = YES; } }
             if (!gPlStepKb) { pl_dialog_show(); return; }
+            if (!h[@"cb"] && !gPlNativeFail) { pl_native_input(h); return; }      // プラグインの文字入力は標準の入力ウィンドウ(BetterMalody 自身の入力はパネルのまま)
         } else { pl_dialog_show(); return; }
     }
     if (!gPl.panel || !gPl.editor || !gPl.inTb) return;
@@ -2064,6 +2111,16 @@ static void pl_lane_shrink(void *ed, BOOL on) {
         b[168] = 1; b[368] = 1; b[300] = 1; b[437] = 1;
     }
     gPlShrink.applied = YES;
+}
+static float pl_node_px(void *n) {
+    if (gPlShrink.applied) for (int i = 0; i < gPlShrink.cnt; i++) if (gPlShrink.t[i] == n) return gPlShrink.px[i];
+    return VT(n, 192, float (*)(void *))(n);
+}
+static float pl_lasso_local_x(void *n, float vx) {
+    float cur = VT(n, 192, float (*)(void *))(n);
+    if (!gPlShrink.applied) return vx - cur;
+    for (int i = 0; i < gPlShrink.cnt; i++) if (gPlShrink.t[i] == n) return vx - gPlShrink.px[i];   // 縮んだノード: ローカル座標に縮尺がかかるので、縮む前の位置からの差でよい
+    return gPlShrink.cx + gPlShrink.s * (vx - gPlShrink.cx) - cur;                                  // 縮んでいないノード: 縮んだ画面上の位置へ戻す
 }
 static void pl_right_set(BOOL on) {
     if (!gPlRList) return;

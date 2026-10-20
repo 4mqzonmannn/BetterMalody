@@ -1607,18 +1607,33 @@ static void quantize_selection(void *ed, int divOverride) {
 static BOOL gLasso;
 static NSMutableData *gLassoPts;    // float{x,y} の列(editor 空間)
 static BOOL gLassoActive;
+// ノーツ種別のツールバー(editor+1336)の強調: Lasso を ON にしたら外し、OFF に戻したら選択中のツール(editor+1368 = 押したボタンのタグ)を強調し直す
+static void lasso_tool_highlight(void *ed, BOOL on) {
+    uint8_t *tb = (uint8_t *)ed + 1336;
+    void **b = *(void ***)(tb + 8), **en = *(void ***)(tb + 16);
+    if (!b || b >= en || (en - b) > 64) return;
+    int tool = *(int *)((uint8_t *)ed + 1368);
+    for (void **p = b; p != en; p++) {
+        void *btn = *p;
+        if (!btn) continue;
+        if (!on) { VT(btn, 1080, void (*)(void *, void *))(btn, (void *)VA(0x1016CC9F8ULL)); continue; }
+        if (((int (*)(void *))(*(void ***)btn)[0x2a0 / 8])(btn) == tool) { ((int (*)(void *, void *))VA(0x1001FE188ULL))(tb, btn); break; }
+    }
+}
+static float pl_node_px(void *n);                  // plugins.inc: プラグイン一覧でレーンを縮めている間は、縮める前のノードの x
+static float pl_lasso_local_x(void *n, float vx);  // plugins.inc: 縮める前の座標系の x → ノードのローカル x(縮尺込みで元のタッチ位置に描ける)
 static void lasso_redraw(void *ed, BOOL withLine) {
     const Lay *l = lay_of(ed);
     ((void (*)(void *))VA(l->slide ? VA_GRID_SLIDE : VA_GRID_KEY))(ed);          // 元の格子描画(DrawNode を消去して引き直す)
     if (!withLine || gLassoPts.length < 16) return;
     void *node = *(void **)((uint8_t *)ed + 1480);
-    float nx = VT(node, 192, float (*)(void *))(node), ny = VT(node, 208, float (*)(void *))(node);
+    float ny = VT(node, 208, float (*)(void *))(node);
     const float *p = gLassoPts.bytes;
     size_t n = gLassoPts.length / 8;
     float col[4]; mk(col, 1.0f, 0.9f, 0.2f, 1.0f);
-    for (size_t i = 1; i < n; i++) dline(node, p[2 * i - 2] - nx, p[2 * i - 1] - ny, p[2 * i] - nx, p[2 * i + 1] - ny, col);
+    for (size_t i = 1; i < n; i++) dline(node, pl_lasso_local_x(node, p[2 * i - 2]), p[2 * i - 1] - ny, pl_lasso_local_x(node, p[2 * i]), p[2 * i + 1] - ny, col);
     float col2[4]; mk(col2, 1.0f, 0.9f, 0.2f, 0.5f);
-    dline(node, p[2 * n - 2] - nx, p[2 * n - 1] - ny, p[0] - nx, p[1] - ny, col2);   // 閉じる線(薄く)
+    dline(node, pl_lasso_local_x(node, p[2 * n - 2]), p[2 * n - 1] - ny, pl_lasso_local_x(node, p[0]), p[1] - ny, col2);   // 閉じる線(薄く)
 }
 static BOOL poly_has(const float *p, size_t n, float x, float y) {   // even-odd
     BOOL in = NO;
@@ -1634,7 +1649,7 @@ static void lasso_select(void *ed) {
     const Lay *l = lay_of(ed);
     uint8_t *e = (uint8_t *)ed;
     void *cont = *(void **)(e + 1472);
-    float cx = VT(cont, 192, float (*)(void *))(cont), cy = VT(cont, 208, float (*)(void *))(cont);
+    float cx = pl_node_px(cont), cy = VT(cont, 208, float (*)(void *))(cont);
     float K = LF(ed, l->zoom) * LF(ed, l->base);
     float xw = l->slide ? LF(ed, 1696) : 0;
     const float *p = gLassoPts.bytes;
@@ -1661,9 +1676,9 @@ static void lasso_select(void *ed) {
         }
         if (in) [hit addObject:sv];
     }
-    sel_clear(ed);
-    for (NSValue *sv in hit) sel_add(ed, sv.pointerValue);
-    char buf[48]; snprintf(buf, sizeof buf, "Lasso: %lu notes", (unsigned long)[hit count]);
+    for (NSValue *sv in hit) sel_add(ed, sv.pointerValue);   // 既に選択中のノートは解除せず、囲んだものを加える
+    void **sv2 = sel_vec(ed);
+    char buf[48]; snprintf(buf, sizeof buf, "Lasso: +%lu (selected %ld)", (unsigned long)[hit count], (long)((void **)sv2[1] - (void **)sv2[0]));
     ed_toast_text(ed, buf, 4);
 }
 // タッチ処理(keytouch / s_touch フックから)。戻り値 YES = 消費した
@@ -1674,7 +1689,7 @@ static BOOL lasso_touch(void *ed, int ev, void *pos) {
     if (ev == 0) {
         const Lay *l = lay_of(ed);
         void *cont = *(void **)((uint8_t *)ed + 1472);
-        float cx = VT(cont, 192, float (*)(void *))(cont);
+        float cx = pl_node_px(cont);
         float x0, x1;
         if (!l->slide) {
             int cnt = ((uint8_t *)ed)[1700]; if (cnt < 1) cnt = 1;
@@ -1683,7 +1698,6 @@ static BOOL lasso_touch(void *ed, int ev, void *pos) {
         if (pt[0] < x0 || pt[0] > x1) return NO;          // レーン外(ツールバー等)は元の処理
         gLassoActive = YES;
         gLassoPts = [NSMutableData data];
-        sel_clear(ed);
     }
     if (!gLassoActive) return NO;
     if (ev == 0 || ev == 1 || ev == 2) {
@@ -2356,6 +2370,7 @@ static intptr_t hook_touch(void *self, int ev, void *node, void *pos) {
         if (tag == BM_TAG_LASSO && lay_of(self)) {
             if (ev == 3) {
                 gLasso = !gLasso; gLassoActive = NO; gLassoPts = nil;
+                lasso_tool_highlight(self, !gLasso);
                 ed_toast_text(self, gLasso ? "Lasso mode: ON (draw around notes)" : "Lasso mode: OFF", 4);
             }
             return 0;
@@ -2435,7 +2450,15 @@ static intptr_t hook_touch(void *self, int ev, void *node, void *pos) {
             return 0;
         }
     }
-    return orig_touch(self, ev, node, pos);
+    intptr_t tr = orig_touch(self, ev, node, pos);
+    if (gLasso && ev == 3 && node && lay_of(self)) {   // ノーツ種別のアイコン(押した後の選択中ツールのタグと一致)を押したら、Lasso を終えて配置へ戻る
+        int tg = ((int (*)(void *))(*(void ***)node)[0x2a0 / 8])(node);
+        if (tg != BM_TAG_LASSO && tg == *(int *)((uint8_t *)self + 1368)) {
+            gLasso = NO; gLassoActive = NO; gLassoPts = nil;
+            ed_toast_text(self, "Lasso mode: OFF", 4);
+        }
+    }
+    return tr;
 }
 
 // ---- エディタの Effect マーカー(ゲーム内ラベル: エディタのノードへ直接追加。OS の UI は使わない) ----

@@ -13,6 +13,8 @@
 #define CFG_TAG_MBAR   96
 #define CFG_TAG_MLBL   97
 #define CFG_TAG_PANEL  99
+#define CFG_TAG_OSU    100   // 「osu! Store」ボタン(設定画面の最下段)
+#define CFG_TAG_OPTS   101   // 「Editor options」ボタン
 
 static int gMasterVol = 100;
 static struct { void *scene, *mbar, *mlbl, *panel, *title, *tb; int target; } gCfg;
@@ -127,6 +129,18 @@ static cfgtouch_fn orig_cfgtouch;
 static intptr_t hook_cfgtouch(void *scene, int ev, void *node, float *pos) {   // sub_100019B8C
     if (node && ev != 7 && scene == gCfg.scene) {
         int tag = cfg_tag(node);
+        if (tag == CFG_TAG_OSU) {                                             // osu! Store を開く(クリック 1 回につき 1 度)
+            static CFAbsoluteTime last;
+            CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+            if ((ev == 3 || ev == 2) && now - last > 1.0) { last = now; dispatch_async(dispatch_get_main_queue(), ^{ osu_settings_menu(); }); }
+            return orig_cfgtouch(scene, ev, node, pos);                       // ボタンの押下表示は標準の処理に任せる
+        }
+        if (tag == CFG_TAG_OPTS) {                                            // Editor options を開く(クリック 1 回につき 1 度)
+            static CFAbsoluteTime last;
+            CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+            if ((ev == 3 || ev == 2) && now - last > 1.0) { last = now; dispatch_async(dispatch_get_main_queue(), ^{ bm_opts_menu(); }); }
+            return orig_cfgtouch(scene, ev, node, pos);
+        }
         if (tag >= CFG_TAG_HIT0 && tag <= CFG_TAG_PANEL) {
             BOOL panelOn = gCfg.panel && VT(gCfg.panel, 344, int (*)(void *))(gCfg.panel);
             if (panelOn) os_log(L, "settings touch: ev=%d tag=%d node=%p", ev, tag, node);   // 診断: 入力パネルが開いている間のタッチ

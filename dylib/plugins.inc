@@ -227,6 +227,8 @@ static void pl_post(uint8_t *n) {
 }
 
 // ---- ホストのコールバック ----
+static int h_beat(int id, int head, LHBeat *o);
+static int h_x(int id);
 static int h_sel(int *ids, int max) {
     pl_need();
     int m = 0;
@@ -245,6 +247,20 @@ static int h_sel(int *ids, int max) {
         void *note = VT(sp, 704, void *(*)(void *))(sp);
         intptr_t id = (intptr_t)CFDictionaryGetValue(gPlId, note);
         if (id > 0) ids[m++] = (int)id - 1;
+    }
+    // 選んだ順(タップ順・投げ縄の内部順)ではなく、時系列(始点の拍 → x)に並べて渡す。Malody V の GetSelectNotes と同じ(wipe を slide にまとめるプラグインなどが、seg を時系列で作れる)
+    if (m > 1) {
+        NSMutableArray<NSNumber *> *arr = [NSMutableArray arrayWithCapacity:(NSUInteger)m];
+        for (int i = 0; i < m; i++) [arr addObject:@(ids[i])];
+        [arr sortWithOptions:NSSortStable usingComparator:^NSComparisonResult(NSNumber *x, NSNumber *y) {
+            LHBeat bx = {0, 0, 1}, by = {0, 0, 1};
+            h_beat(x.intValue, 1, &bx); h_beat(y.intValue, 1, &by);
+            double vx = bx.m + (double)bx.num / bx.den, vy = by.m + (double)by.num / by.den;
+            if (vx != vy) return vx < vy ? NSOrderedAscending : NSOrderedDescending;
+            int xx = h_x(x.intValue), xy = h_x(y.intValue);
+            return xx == xy ? NSOrderedSame : (xx < xy ? NSOrderedAscending : NSOrderedDescending);
+        }];
+        for (int i = 0; i < m; i++) ids[i] = arr[(NSUInteger)i].intValue;
     }
     return m;
 }
@@ -695,7 +711,7 @@ static void pl_rebuild_dirty(void) {     // 節を変えたノートのスプラ
         if (fl[113] & 8) ((void *(*)(void *, void *))VA(0x1000C88C8ULL))(ed, n);
         else ((void (*)(void *, void *))VA(0x1000C8A68ULL))(ed, n);
         void *sp = sprite_for_note(ed, n);
-        if (sp) CFDictionarySetValue(gPlSprite, n, sp);
+        if (sp && gPlSprite) CFDictionarySetValue(gPlSprite, n, sp);
         if (sp) VT(ed, 1664, void (*)(void *, void *))(ed, n);
         if (sp && wasSel) sel_add(ed, sp);         // 選択中だったノートは作り直した後も選択したままにする
         gPlEdits++;

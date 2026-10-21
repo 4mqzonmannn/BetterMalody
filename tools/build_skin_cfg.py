@@ -18,6 +18,12 @@ AREA2_OLD = "_area2-[1-8]\n"
 AREA2_NEW = "_area2-[1,2,6,7,3,5,4,8]\n"            # Offset x2 / 3D column / angle / DJ disk / fullwidth / storyboard / portrait
 AREA3_OLD = "_area3-[1,5,3,7,6,4,2]\n"
 AREA3_NEW = "_area3-[4,2,3,7,1,5,6]\n"              # Language / Skin / Original title / Grid mode / FPS(, 非表示の 2 つ)
+AREA6_OLD = "_area6-[1-3]\n"
+AREA6_NEW = "_area6-[1-5]\n"                        # 最下段に「osu! Store」の行を足す
+BTN_OLD = "_button-[1-13]\n"
+BTN_NEW = "_button-[1-15]\n"
+BTNSTR_OLD = "_buttonstr-[1-13]\n"
+BTNSTR_NEW = "_buttonstr-[1-15]\n"
 
 # スライダー番号 -> (所属 area, 単位)。1..5 は元のスライダー、6 が Master
 SLIDERS = {1: ("_area1-1", "%"), 2: ("_area1-2", "%"), 3: ("_area2-1", "ms"),
@@ -33,6 +39,13 @@ def block():
           "    pos=_slidebg-6 0,0", "    zindex=2", "    parent=_area1-7", "    tag=96",
           "_slidestr-6", "    type=1", "    fsize={f2}", "    anchor=4", "    pos={slide_x},45", "    zindex=4",
           "    text=100", "    parent=_area1-7", "    tag=97"]
+    # osu! Store の行(最下段): 見出し + 既存と同じ見た目のボタン(tag 100)
+    L += ["_label-33", "    type=1", "    fsize={f2}", "    anchor=3", "    pos=87,45", "    text=Store server", "    parent=_area6-4",
+          "_button-14", "    tag=100", "    parent=_area6-4",
+          "_buttonstr-14", "    text=Malody / osu! (sayobot)...", "    parent=_button-14",
+          "_label-34", "    type=1", "    fsize={f2}", "    anchor=3", "    pos=87,45", "    text=BetterMalody", "    parent=_area6-5",
+          "_button-15", "    tag=101", "    parent=_area6-5",
+          "_buttonstr-15", "    text=Editor options...", "    parent=_button-15"]
     # 値の単位 と 手入力の当たり判定
     for n, (area, unit) in SLIDERS.items():
         L += [f"_slideunit-{n}", "    type=1", "    fsize={f2}", "    anchor=3", "    pos={slide_x}+52,45", "    zindex=4",
@@ -69,7 +82,7 @@ def main():
     _, _, ents = skinpkg.parse(d)
     e = [x for x in ents if x["key"] == KEY][0]
     text = d[e["data"]:e["data"] + e["size"]].decode("utf-8")
-    for old, new in ((AREA1_OLD, AREA1_NEW), (AREA2_OLD, AREA2_NEW), (AREA3_OLD, AREA3_NEW)):
+    for old, new in ((AREA1_OLD, AREA1_NEW), (AREA2_OLD, AREA2_NEW), (AREA3_OLD, AREA3_NEW), (AREA6_OLD, AREA6_NEW), (BTN_OLD, BTN_NEW), (BTNSTR_OLD, BTNSTR_NEW)):
         assert old in text, old
         text = text.replace(old, new, 1)
     text = text.rstrip("\n") + "\n" + block()

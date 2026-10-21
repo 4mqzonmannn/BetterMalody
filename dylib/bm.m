@@ -47,6 +47,7 @@
 #define BM_TAG_MORE_BPM   702   // 選択メニューの項目 = BPM リスト(元の動作)
 #define BM_TAG_PLUGINS    766   // 選択メニューの項目 = Lua プラグイン管理
 #define BM_TAG_PDEV       774   // その他 > Plugin Dev(ログ / Lua コンソール)
+#define BM_TAG_OPTS       775   // その他 > Editor options(オプトインの設定)
 #define BM_TAG_CHOICE_BACK 773  // 選択メニュー(BPM / Effect / Plugins / Folder)の Back = メニューを閉じる
 #define BM_TAG_FOLDER     767   // 選択メニューの項目 = 曲フォルダをファイル App / Finder で開く
 #define BM_TAG_BPM_ICON   18    // 右のツールバーの2番目(メトロノーム)= 元はBPMリストを開く
@@ -1899,10 +1900,24 @@ static void info_pick(void *ed, int k) {
 
 #include "plugins.inc"
 #include "undo.inc"
+#include "osu.inc"
+#include "opts.inc"
 #include "settings.inc"
 #include "gameplay.inc"
 #include "turbo.inc"
 #include "taiko.inc"
+// More(…)ボタンの強調: Lasso / Order(More の中のツール)が有効な間は、ノーツ配置系ツールと同じ青にする。
+// ボタンの特定は「押した直後にツールメニュー(editor+1400)が開いたノード」を覚える(最初に More を開いたときに分かる)
+static void *gMoreNode, *gMoreEd;
+static int gMoreApplied = -1;
+static void more_sync(void *ed) {
+    if (!gMoreNode || gMoreEd != ed) return;
+    BOOL want = gLasso || (gOrdMode && gOrdEd == ed);
+    if (gMoreApplied == (int)want) return;
+    gMoreApplied = want;
+    if (want) { uint8_t col[32]; ((void (*)(void *, long, long, long))VA(0x1005545B8ULL))(col, 2, 206, 255); VT(gMoreNode, 1080, void (*)(void *, void *))(gMoreNode, col); }
+    else VT(gMoreNode, 1080, void (*)(void *, void *))(gMoreNode, (void *)VA(0x1016CC9F8ULL));
+}
 
 static void *gSelMenuFor;
 // 「その他」メニューの分類(カテゴリ)。カテゴリ項目を押すと、その中の項目へ差し替えて表示する(最後に「戻る」)。
@@ -1968,6 +1983,7 @@ static void sel_add_menu_items(void *self) {   // 「その他」メニューに
     add_menu_item(tb, "ui-edit-icon1.png", BM_TAG_CAT_EFFECT, "Effect >");
     add_menu_item(tb, "ui-edit-icon26.png", BM_TAG_CAT_SPEC, "Spectrogram >");
     add_menu_item(tb, "ui-edit-icon28.png", BM_TAG_PDEV, "Plugin Dev...");
+    add_menu_item(tb, "ui-edit-icon28.png", BM_TAG_OPTS, "Editor options...");
 }
 
 // ---- 汎用スライダーダイアログ(ゲーム標準の編集中断ダイアログ script_editpause.mui と同じ見た目: 中央のパネルにゲージ最大 2 本)----
@@ -2157,6 +2173,7 @@ static void fx_kind_cb(void *owner, void *dlg, int id) {   // 種類ダイアロ
         tb_set(gFx.tb[0], fmt_opt(eff_at(gFx.sel), FX_FLAG[gFx.kind], FX_VAL[gFx.kind]));
 }
 static int mod_is_node(void *node);   // modules.inc: 1 = プラグインの描画物 / 0 = 違う(描画物があるときだけ -1 以外)
+static int gZmTag; static CFAbsoluteTime gZmTagT;   // ズームのボタンの押下(下の zm_filter が参照)
 static intptr_t hook_touch(void *self, int ev, void *node, void *pos) {
     if (ev != 7 && is_key_editor(self)) un_mark();
     if (gPlROn && ev != 7 && node) {            // 診断: 一覧を開いている間のノードへのタッチ(タグ / 種類 / 位置)
@@ -2205,6 +2222,10 @@ static intptr_t hook_touch(void *self, int ev, void *node, void *pos) {
         }
         if (tag == BM_TAG_PDEV && (lay_of(self) || is_taiko(self))) {             // 「その他 > Plugin Dev」: ログ / Lua コンソール
             if (ev == 3) { gEditor = self; os_log(L, "plugin dev: open"); dispatch_async(dispatch_get_main_queue(), ^{ pl_dev_menu(); }); }
+            return 0;
+        }
+        if (tag == BM_TAG_OPTS && (lay_of(self) || is_taiko(self))) {             // 「その他 > Editor options」: オプトインの設定
+            if (ev == 3) { gEditor = self; dispatch_async(dispatch_get_main_queue(), ^{ bm_opts_menu(); }); }
             return 0;
         }
         if (tag == BM_TAG_FOLDER && (lay_of(self) || is_taiko(self))) {           // 「その他 > Folder」: 曲のフォルダを開く
@@ -2456,7 +2477,34 @@ static intptr_t hook_touch(void *self, int ev, void *node, void *pos) {
             return 0;
         }
     }
+    if (ev == 3 && node && lay_of(self) && lay_of(self)->slide) {   // 標準の Wipe→Slide(タグ 90)は、選択に Wipe 以外が 1 つでも混ざると拒否する(3 個以上の Wipe が必要)。Wipe だけを選び直してから渡す
+        int dt = ((int (*)(void *))(*(void ***)node)[0x2a0 / 8])(node);
+        if (dt == 90) {
+            void **sv = sel_vec(self);
+            NSMutableArray<NSValue *> *wipes = [NSMutableArray array];
+            long other = 0;
+            for (void **q = (void **)sv[0]; q != (void **)sv[1]; q++) {
+                uint8_t *n = VT(*q, 704, uint8_t *(*)(void *))(*q);
+                if (n && (n[113] & 4)) [wipes addObject:[NSValue valueWithPointer:n]]; else other++;
+            }
+            os_log(L, "wipe2slide: selected wipes=%lu other=%ld", (unsigned long)wipes.count, other);
+            if (other && wipes.count >= 3) {
+                ((void (*)(void *))VA(0x1000C5954ULL))(self);               // 選択を全部外してから、Wipe だけ選び直す
+                for (NSValue *w in wipes) { void *sp = sprite_for_note(self, w.pointerValue); if (sp) sel_add(self, sp); }
+            }
+        }
+    }
+    if (ev == 3 && node && lay_of(self)) {                // ズームのボタン(タグ 6 / 7)の押下を控える(直後に標準がズーム関数を呼ぶ)
+        int zt = ((int (*)(void *))(*(void ***)node)[0x2a0 / 8])(node);
+        if (zt == 6 || zt == 7) { gZmTag = zt; gZmTagT = CFAbsoluteTimeGetCurrent(); os_log(L, "zoom button: tag=%d", zt); }
+    }
+    BOOL popBefore = NO;
+    if (ev == 3 && node && lay_of(self)) { void *pp = menu_popup((uint8_t *)self + 1400); popBefore = pp && VT(pp, 344, int (*)(void *))(pp); }
     intptr_t tr = orig_touch(self, ev, node, pos);
+    if (ev == 3 && node && lay_of(self) && !popBefore) {     // 押した直後にツールメニューが開いた = More ボタン
+        void *pp = menu_popup((uint8_t *)self + 1400);
+        if (pp && VT(pp, 344, int (*)(void *))(pp) && gMoreNode != node) { gMoreNode = node; gMoreEd = self; gMoreApplied = -1; os_log(L, "more button learned: %p", node); }
+    }
     if (gLasso && ev == 3 && node && lay_of(self)) {   // ノーツ種別のアイコン(押した後の選択中ツールのタグと一致)を押したら、Lasso を終えて配置へ戻る
         int tg = ((int (*)(void *))(*(void ***)node)[0x2a0 / 8])(node);
         if (tg != BM_TAG_LASSO && tg == *(int *)((uint8_t *)self + 1368)) {
@@ -3011,7 +3059,7 @@ static void spec_offset_check(void *ed) {
 
 #include "modules.inc"
 static void hook_refresh_inner(void *a1, float dt);
-static void hook_refresh(void *a1, float dt) { hook_refresh_inner(a1, dt); if (lay_of(a1)) { ovl_update(a1); spec_update(a1); mod_update(a1); un_tick(a1); pl_right_tick(a1); } }
+static void hook_refresh(void *a1, float dt) { hook_refresh_inner(a1, dt); if (lay_of(a1)) { ovl_update(a1); spec_update(a1); mod_update(a1); un_tick(a1); pl_right_tick(a1); more_sync(a1); } }
 static void hook_refresh_inner(void *a1, float dt) {   // sub_1001B0AF0 = 毎フレーム update(dt)
     if (gPreview && a1 == gEditor) {
         ((void (*)(void *, float))VA(0x100075D2CULL))(a1, dt);   // 元の先頭呼び出し(基底の位置更新)
@@ -3023,8 +3071,39 @@ static void hook_refresh_inner(void *a1, float dt) {   // sub_1001B0AF0 = 毎フ
     }
     orig_refresh(a1, dt);
 }
+// ---- ズームの上限を広げる(+5 段階): 標準の + ボタンが上限で止まったら、こちらで同じ比率だけ拡大を続ける ----
+// 標準の段階は layout 側の表で決まる(上限 16 段)。ボタンのタグ(6 / 7)の押下の直後にズーム関数が呼ばれるので、そこで要求値を差し替える。縮小は足した分を先に戻す
+#define ZM_EXTRA_MAX 5
+static int gZmExtra, gZmTag;
+static float gZmLimit, gZmStep = 0.1f;                    // 上限に当たったときの標準の値 / 標準の 1 段の幅
+static CFAbsoluteTime gZmTagT;
+// 拡大 = タグ 6 / 縮小 = タグ 7。標準は上限で値を変えない(要求値 = 上限)。上限に当たったら、標準と同じ幅で最大 ZM_EXTRA_MAX 段、要求値を差し替えて拡大を続ける。
+// 縮小は足した分を先に戻す(標準は縮小で 1 段下がった値を要求してくるので、標準側の値を上限に戻す)
+static float zm_filter(void *ed, float z) {
+    const Lay *l = lay_of(ed);
+    if (!l || CFAbsoluteTimeGetCurrent() - gZmTagT > 0.3 || !gZmTag) { gZmExtra = 0; return z; }   // ボタン以外(ピンチなど)の変更
+    float z0 = LF(ed, l->zoom);
+    uint8_t *lo = *(uint8_t **)((uint8_t *)ed + 1112);                 // layout(標準側のズーム値は +1444)
+    if (z0 <= 0 || z <= 0 || !lo) return z;
+    if (gZmTag == 6) {
+        if (gZmExtra == 0 && z > z0 * 1.000001f) { gZmStep = fmaxf(z - z0, 0.01f); return z; }            // 標準の拡大
+        if (gZmExtra == 0 && fabsf(z - z0) > 1e-6f * z0) return z;                                       // 想定外
+        if (gZmExtra == 0) gZmLimit = z;                                                               // 上限に当たった
+        if (gZmExtra < ZM_EXTRA_MAX) gZmExtra++;
+        os_log(L, "zoom: extra %d -> %.4f", gZmExtra, gZmLimit + gZmStep * gZmExtra);
+        return gZmLimit + gZmStep * gZmExtra;
+    }
+    if (gZmTag == 7 && gZmExtra > 0) {
+        gZmExtra--;
+        *(float *)(lo + 1444) = gZmLimit;                              // 標準側は上限のまま保つ(次の縮小・拡大の基準)
+        os_log(L, "zoom: extra %d -> %.4f", gZmExtra, gZmLimit + gZmStep * gZmExtra);
+        return gZmLimit + gZmStep * gZmExtra;
+    }
+    gZmExtra = 0;
+    return z;
+}
 static intptr_t hook_zoom(void *a1, float z) {  // sub_1001B10C0 (zoom 変更: 子ノードを線形再スケール)
-    intptr_t r = orig_zoom(a1, z);
+    intptr_t r = orig_zoom(a1, zm_filter(a1, z));
     if (gPreview && a1 == gEditor) ed_relayout(a1);
     return r;
 }
@@ -3140,10 +3219,50 @@ static BOOL path_tap_near_point(void *path, const void *pos) {
     }
     return NO;
 }
+// オプション: Slide の Remove ツール(タグ 83)で経路のスライドを押したら、ノートごとではなく、押した位置より後ろの中継点だけを消す(Malody V と同じ)。
+// 頭(始点)を押したとき / 中継点が無いスライド / Wipe は標準どおりノートごと消す。押した位置 = 拍で、中継点の近く(0.1 拍以内)ならその中継点から後ろを消す
+static BOOL slide_remove_cut(void *ed, void *spr, void *pos) {
+    uint8_t *e = (uint8_t *)ed;
+    if (*(int *)(e + 1368) != 83 || !pos) return NO;
+    uint8_t *n = VT(spr, 704, uint8_t *(*)(void *))(spr);
+    if (!n || !(n[113] & 8)) return NO;
+    uint8_t *vb = *(uint8_t **)(n + 136), *ve = *(uint8_t **)(n + 144);
+    long cnt = (ve - vb) / 28;
+    if (cnt <= 0 || cnt > 4096) return NO;
+    typedef struct { float v[2]; uint64_t pad[2]; } V2Ret;
+    V2Ret r = ((V2Ret (*)(void *, const void *))VA(0x100546980ULL))(*(void **)(e + 1472), pos);   // 押した位置 → 容器の座標
+    double K = (double)LF(ed, 1716) * (double)LF(ed, 1720);
+    if (K <= 0) return NO;
+    double tb = r.v[1] / K, head = note_beat(n, 64, 72, 76);
+    if (tb <= head + 0.1) return NO;                                  // 頭 = ノートごと消す
+    long k = cnt;
+    for (long i = 0; i < cnt; i++) if (head + note_beat(vb + 28 * i, 0, 8, 12) > tb) { k = i; break; }
+    if (k > 0 && tb - (head + note_beat(vb + 28 * (k - 1), 0, 8, 12)) <= 0.1) k--;   // 中継点そのものを押した
+    if (k >= cnt) k = cnt - 1;
+    if (k <= 0) return NO;                                            // 中継点が 1 つも残らない = 頭だけのスライドは標準では作れず、押しても消せなくなる → ノートごと消す
+    *(uint8_t **)(n + 144) = vb + 28 * k;
+    Rat end = rat_of(n + 64);
+    if (k > 0) end = rat_add(end, rat_of(vb + 28 * (k - 1)));
+    beat_write_rat(n + 88, end);                                      // 終端 = 残った最後の中継点
+    void *savedEd = gPlEd; gPlEd = ed;
+    pl_seg_touch(n);
+    pl_rebuild_dirty();
+    gPlEd = savedEd;
+    *(e + 883) = 1;
+    os_log(L, "remove-cut: kept %ld of %ld segs (touch=%.3f head=%.3f)", k, cnt, tb, head);
+    return YES;
+}
 static intptr_t hook_s_note(void *a1, int ev, void *a3, void *pos) {   // sub_1000C7224: ノート自身へのタッチ(選択・移動)。順番に選択はここで選択が更新された後に控える
+    if (ev == 0 && a3 && bm_opt(BMO_REMOVE_CUT) && slide_remove_cut(a1, a3, pos)) return 0;
     intptr_t r = orig_snote(a1, ev, a3, pos);
     ord_track(a1, ev);
     return r;
+}
+// 標準のノートの並び順(Wipe→Slide の seg 順など): 同じ小節内の比較で num * den が 32bit を超えると順序が壊れる(分母 1048576 の wipe)。64bit で比べ直す
+static intptr_t hook_notecmp(const int32_t *a, const int32_t *b) {   // sub_1001EB6A0
+    if (a[21] != b[21]) return a[21] < b[21];
+    if (a[16] != b[16]) return a[16] < b[16];
+    return (int64_t)a[18] * (int64_t)(uint32_t)b[19] < (int64_t)(uint32_t)a[19] * (int64_t)b[18];
 }
 typedef intptr_t (*pathhit_fn)(void *, const void *);
 static pathhit_fn orig_pathhit;
@@ -3166,7 +3285,24 @@ static void hook_uiinit(void *self, void *layout) {   // sub_100073140: UI初期
     }
 }
 static void hook_s_refresh_inner(void *a1, float dt);
-static void hook_s_refresh(void *a1, float dt) { hook_s_refresh_inner(a1, dt); if (lay_of(a1)) { ovl_update(a1); spec_update(a1); mod_update(a1); un_tick(a1); pl_right_tick(a1); } }
+// Slide のノーツ幅グリッド(more の Grid lines / Grid align)は、エディタ内の 2 バイト(+1732 = 揃える ON/OFF、+1733 = 分割数)。エディタを抜けると初期値に戻るので、
+// アプリが起動している間は保持する: 新しいエディタの最初のフレームで保存値を書き戻し、その後の変更を保存する
+static void slide_grid_keep(void *ed) {
+    const Lay *l = lay_of(ed);
+    if (!l || !l->slide) return;
+    static void *lastEd; static BOOL have, armed; static uint8_t sv[2]; static int frames;
+    uint8_t *g = (uint8_t *)ed + 1732;
+    if (lastEd != ed) { lastEd = ed; armed = NO; frames = 0; }
+    if (!armed) {
+        if (++frames < 30) return;                      // エディタの初期化が済むまで待つ
+        armed = YES;
+        if (have) { g[0] = sv[0]; g[1] = sv[1]; ((void (*)(void *))VA(0x1000C63E8ULL))(ed); os_log(L, "grid: restored align=%d lines=%d", g[0], g[1]); }   // sub_1000C63E8 = 設定の反映後の再構築
+        else { sv[0] = g[0]; sv[1] = g[1]; have = YES; }
+        return;
+    }
+    if (g[0] != sv[0] || g[1] != sv[1]) { sv[0] = g[0]; sv[1] = g[1]; have = YES; os_log(L, "grid: saved align=%d lines=%d", sv[0], sv[1]); }
+}
+static void hook_s_refresh(void *a1, float dt) { hook_s_refresh_inner(a1, dt); if (lay_of(a1)) { ovl_update(a1); spec_update(a1); mod_update(a1); un_tick(a1); slide_grid_keep(a1); pl_right_tick(a1); more_sync(a1); } }
 static void hook_s_refresh_inner(void *a1, float dt) {   // sub_1000C5408 = EditorSlide update
     if (gPreview) {
         static int cnt; static double lastPos = -1e9;
@@ -3184,7 +3320,7 @@ static void hook_s_refresh_inner(void *a1, float dt) {   // sub_1000C5408 = Edit
     orig_s_refresh(a1, dt);
 }
 static intptr_t hook_s_zoom(void *a1, float z) {   // sub_1000C5AB0
-    intptr_t r = orig_s_zoom(a1, z);
+    intptr_t r = orig_s_zoom(a1, zm_filter(a1, z));
     if (gPreview && a1 == gEditor) ed_relayout(a1);
     return r;
 }
@@ -3350,6 +3486,7 @@ static void bm_web_external_install(void) {
 }
 __attribute__((constructor)) static void bm_init(void) {
     L = os_log_create("BetterMalody", "rt");
+    dispatch_async(dispatch_get_main_queue(), ^{ osu_srv_boot(); });
     gSlide = (uintptr_t)_dyld_get_image_vmaddr_slide(0);
     orig_touch = (touch_fn)VA(BM_ORIG_TOUCH_VA);
     orig_refresh = (refresh_fn)VA(BM_ORIG_REFRESH_VA);
@@ -3401,6 +3538,7 @@ __attribute__((constructor)) static void bm_init(void) {
     orig_tgrid = (tgrid_fn)VA(0x100005380ULL); slots[39] = (void *)hook_tgrid;              // tgrid(cave 0x100005370 + 16): Taiko のグリッド再構築
     orig_tgridpos = (tgridpos_fn)VA(0x100005398ULL); slots[40] = (void *)hook_tgridpos;     // tgridpos(cave 0x100005388 + 16): Taiko のグリッド位置
     orig_pathhit = (pathhit_fn)VA(0x1000053C8ULL); slots[42] = (void *)hook_pathhit;          // pathhit(cave 0x1000053B8 + 16): 重複 beat のスライドの当たり判定の誤判定を外す
+    slots[43] = (void *)hook_notecmp;                                                              // notecmp(cave 0x1000053D0): 分数の比較を 64bit に
     orig_snote = (keytouch_fn)VA(0x1000053B0ULL); slots[41] = (void *)hook_s_note;               // snote(cave 0x1000053A0 + 16): Slide のノートへのタッチ
     {
         NSUserDefaults *u = NSUserDefaults.standardUserDefaults;

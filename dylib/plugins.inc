@@ -268,6 +268,8 @@ static int h_sel(int *ids, int max) {
 static NSMutableArray<NSValue *> *gOrdNotes;     // 控えたノート(ポインタ)をタップ順に
 static BOOL gOrdMode; static NSUInteger gOrdIdx; static void *gOrdEd;
 static void ord_marks_refresh(void *ed);
+static void ord_tint_sync(void *ed);
+static void ord_normal_reset(void *ed);
 static int h_order(int *ids, int max) {
     pl_need();
     int m = 0;
@@ -278,7 +280,7 @@ static int h_order(int *ids, int max) {
     }
     return m;
 }
-static void h_order_clear(void) { [gOrdNotes removeAllObjects]; }
+static void h_order_clear(void) { [gOrdNotes removeAllObjects]; if (gPlEd) { ord_tint_sync(gPlEd); ord_marks_refresh(gPlEd); } }
 static int h_count(void) { pl_need(); if (gPlLiveDirty) pl_rebuild_live(); return (int)gPlLive.count; }
 static int h_at(int i) { pl_need(); if (gPlLiveDirty) pl_rebuild_live(); return (i >= 0 && i < (int)gPlLive.count) ? gPlLive[i].intValue : -1; }
 static int h_type(int id) {
@@ -1379,6 +1381,7 @@ static void pl_key_event(int key, BOOL down) {
     int rc = lh_call_key(gPlSess, key, down, err, sizeof err);
     pl_session_end(ed, rc, err, YES);
 }
+static BOOL kb_key_event(long code, BOOL pressed);
 static int pl_hid_to_key(long c) {
     if (c >= 4 && c <= 29) return 97 + (int)(c - 4);
     if (c >= 30 && c <= 38) return 49 + (int)(c - 30);
@@ -1396,9 +1399,11 @@ static void pl_kb_register(void) {
     id inp = kb ? [kb valueForKey:@"keyboardInput"] : nil;
     if (!inp) { os_log(L, "plugins: OnKey: no keyboard"); done = NO; return; }
     void (^h)(id, id, long, BOOL) = ^(id input, id key, long code, BOOL pressed) {
-        int k = pl_hid_to_key(code);
-        if (k < 0) return;
-        dispatch_async(dispatch_get_main_queue(), ^{ pl_key_event(k, pressed); });
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (kb_key_event(code, pressed)) return;                    // ショートカット(bm.m の kbd.inc)として処理したキーはプラグインへ渡さない
+            int k = pl_hid_to_key(code);
+            if (k >= 0) pl_key_event(k, pressed);
+        });
     };
     [inp setValue:h forKey:@"keyChangedHandler"];
     os_log(L, "plugins: OnKey registered");
@@ -1552,7 +1557,7 @@ static void pl_run(void *ed, NSUInteger idx) {
         // その他メニューの「Order select」で先に順番を作っておいた場合は、Run で即実行(editor.html / Slide Editor の Order と同じ)
         if (!gOrdNotes) gOrdNotes = [NSMutableArray array];
         if (!gOrdNotes.count && !(gOrdMode && gOrdEd == ed)) {
-            gOrdMode = YES; gOrdEd = ed;
+            gOrdMode = YES; gOrdEd = ed; ord_normal_reset(ed);
             ed_toast_text(ed, "Order select ON: tap slides in order, then Run again", 4);
             return;
         }
@@ -1591,6 +1596,25 @@ static void pl_run(void *ed, NSUInteger idx) {
 }
 // ---- Plugin Dev(その他メニュー): ログの表示 / コピー / 消去 / Lua を 1 行実行(iOS 標準のウィンドウ)----
 static void pl_dev_menu(void);
+// アラートの提示: 直前のアラートが閉じ終わっていない間(Mac は閉じるアニメーションが長い)の提示は黙って無視されるので、閉じ終わるまで待ってから出す(最大 5 秒)。
+// ★外すと、3 つ目以降のアラート(Add shortcut など)が出なくなる(2026-10-21 実機確認)
+static void pl_present(id ac, int tries) {
+    @try {
+        id app = [(id)NSClassFromString(@"UIApplication") valueForKey:@"sharedApplication"];
+        id vc = [[app valueForKey:@"keyWindow"] valueForKey:@"rootViewController"];
+        if (!vc) return;
+        id root = vc;
+        while ([vc valueForKey:@"presentedViewController"]) vc = [vc valueForKey:@"presentedViewController"];
+        BOOL busy = [[vc valueForKey:@"isBeingDismissed"] boolValue] || [[vc valueForKey:@"isBeingPresented"] boolValue] || (vc != root && [vc isKindOfClass:NSClassFromString(@"UIAlertController")]);
+        if (busy && tries < 33) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ pl_present(ac, tries + 1); });
+            return;
+        }
+        ((void (*)(id, SEL, id, BOOL, id))objc_msgSend)(vc, NSSelectorFromString(@"presentViewController:animated:completion:"), ac, YES, nil);
+    } @catch (NSException *ex) { os_log(L, "plugin dev: present exception %{public}@", ex.reason); }
+}
+static id gPlAlertVC;                                   // 表示中のアラート(キーボードでも選べるようにする)
+static NSMutableArray<void (^)(void)> *gPlAlertKeys;     // 項目ごとの「選んだときの処理」(閉じる + 次へ)
 static void pl_alert(NSString *title, NSString *msg, NSString *fieldDef, NSArray<NSString *> *titles, NSArray<NSNumber *> *styles, void (^pick)(NSInteger idx, NSString *text)) {
     @try {
         Class cAC = NSClassFromString(@"UIAlertController"), cAA = NSClassFromString(@"UIAlertAction");
@@ -1611,17 +1635,23 @@ static void pl_alert(NSString *title, NSString *msg, NSString *fieldDef, NSArray
             ((void (*)(id, SEL, id))objc_msgSend)(ac, NSSelectorFromString(@"addTextFieldWithConfigurationHandler:"), cfg);
         }
         SEL mk = NSSelectorFromString(@"actionWithTitle:style:handler:");
+        NSMutableArray<void (^)(void)> *keys = [NSMutableArray array];
         for (NSUInteger i = 0; i < titles.count; i++) {
             NSInteger idx = (NSInteger)i;
-            void (^h)(id) = ^(id a) {
+            void (^run)(void) = ^{
+                gPlAlertVC = nil; gPlAlertKeys = nil;
                 NSString *tx = field ? ([field valueForKey:@"text"] ?: @"") : nil;
                 os_log(L, "plugin dev: pick %ld", (long)idx);
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ pick(idx, tx); });   // 閉じ終わってから次を出す(閉じている途中の提示は無視される)
             };
-            id act = ((id (*)(id, SEL, id, NSInteger, id))objc_msgSend)((id)cAA, mk, titles[i], styles[i].integerValue, h);
+            [keys addObject:[run copy]];
+            void (^h)(id) = ^(id a) { run(); };
+            NSString *label = i < 9 ? [NSString stringWithFormat:@"%lu. %@", (unsigned long)i + 1, titles[i]] : (i == 9 ? [@"0. " stringByAppendingString:titles[i]] : titles[i]);   // 数字キーで選べる(Mac はアラートの項目をクリックできないことがある)
+            id act = ((id (*)(id, SEL, id, NSInteger, id))objc_msgSend)((id)cAA, mk, label, styles[i].integerValue, h);
             ((void (*)(id, SEL, id))objc_msgSend)(ac, NSSelectorFromString(@"addAction:"), act);
         }
-        ((void (*)(id, SEL, id, BOOL, id))objc_msgSend)(vc, NSSelectorFromString(@"presentViewController:animated:completion:"), ac, YES, nil);
+        gPlAlertVC = ac; gPlAlertKeys = keys;
+        pl_present(ac, 0);
     } @catch (NSException *ex) { os_log(L, "plugin dev: alert exception %{public}@", ex.reason); }
 }
 static NSString *gPlDevLast = @"=Editor:GetCurrentBeat().beat";

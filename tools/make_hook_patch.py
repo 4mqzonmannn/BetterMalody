@@ -53,6 +53,9 @@ HOOKS = [
     ("snote",    0x1000C7224, 0x1000053A0),  # EditorSlide のノート(スプライト)へのタッチ(sub_1000C7224): 順番に選択でタップ順を控える
     ("pathhit",  0x100167514, 0x1000053B8),  # PathSpriteEditor の当たり判定(vtable +1128): seg の beat が重複するスライドの誤判定(どこを押しても当たり)を外す
     ("notecmp",  0x1001EB6A0, 0x1000053D0),  # ノートの並び順の比較(sub_1001EB6A0): 分数の大小を 32bit の掛け算で比べるため、分母が大きい(1048576 など)と桁あふれして時系列にならない。64bit で比べる
+    ("s2wipe",   0x1000C5E10, 0x1000053E8),  # Slide → Wipe(sub_1000C5E10): オプションで、始点と seg の位置のまま Wipe にする(標準は分割グリッドへ再配置)
+    ("segadd",   0x1000C6CA8, 0x100005400),  # Slide の seg 追加(sub_1000C6CA8): オプションで、終点より前の beat にも seg を置ける
+    ("chit",     0x1001C8F60, 0x100005418),  # Slide の「その位置にノートがあるか」(sub_1000C8F60): 編集中のスライド自身の本体は「ノートあり」と扱わない(時系列でない seg を本体の上にも置けるように)
 ]
 def u32(x): return struct.pack("<I", x & 0xFFFFFFFF)
 def adrp(rd, target, pc):

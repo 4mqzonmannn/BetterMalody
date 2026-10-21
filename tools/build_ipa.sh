@@ -2,10 +2,10 @@
 # 実機(iPhone)向けの BetterMalody.ipa を、元 IPA(orig/Malody_Mobile_4.3.7.ipa)から作る。
 #   バイナリのコードパッチ(灰色 / 保存値丸め解除 / 分割メニュー / フック)+ dylib(iOS プラットフォーム化)+ skin 差し替え + アプリ名・バンドル ID の書き換え。
 #   署名は ad-hoc(配布先の Sideloadly / AltStore などが自分の証明書で署名し直す)。
-# 使い方: tools/build_ipa.sh [出力 IPA パス(既定 build/BetterMalody_v1.0.5.ipa)]
+# 使い方: tools/build_ipa.sh [出力 IPA パス(既定 build/BetterMalody_v1.0.6.ipa)]
 set -euo pipefail
 P="$(cd "$(dirname "$0")/.." && pwd)"
-OUT="${1:-$P/build/BetterMalody_v1.0.5.ipa}"
+OUT="${1:-$P/build/BetterMalody_v1.0.6.ipa}"
 BUNDLE_ID="me.bettermalody.m"
 APP_NAME="BetterMalody"
 ST="$P/build/stage"
@@ -32,7 +32,7 @@ python3 -I "$P/tools/build_skin_taiko.py" "$W/4.bin" "$W/5.bin"
 cp "$W/5.bin" "$APP/skin-ios.bin"
 
 # 3) dylib(macabi でビルド → iOS 用に変換: フレームワークのパスを iOS 形式へ、プラットフォームを iOS(2)へ)
-"$P/dylib/build.sh" >/dev/null
+BM_CFLAGS=-DBM_PUBLIC "$P/dylib/build.sh" >/dev/null
 D="$APP/BetterMalody.dylib"; cp "$P/dylib/BetterMalody.dylib" "$D"
 for f in Foundation Accelerate ImageIO CoreGraphics CoreFoundation; do
   OLD=$(otool -L "$D" | awk -v f="$f.framework" '$1 ~ f {print $1}' | head -1)

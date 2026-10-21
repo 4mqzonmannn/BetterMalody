@@ -1902,6 +1902,7 @@ static void info_pick(void *ed, int k) {
 #include "undo.inc"
 #include "osu.inc"
 #include "opts.inc"
+#include "kbd.inc"
 #include "settings.inc"
 #include "gameplay.inc"
 #include "turbo.inc"
@@ -2390,6 +2391,7 @@ static intptr_t hook_touch(void *self, int ev, void *node, void *pos) {
             if (ev == 3) {
                 if (!gOrdNotes) gOrdNotes = [NSMutableArray array];
                 gOrdMode = !gOrdMode; gOrdEd = self;
+                if (gOrdMode) ord_normal_reset(self);
                 ed_toast_text(self, gOrdMode ? "Order select: ON (tap slides in order)" : "Order select: OFF (order kept)", 4);
             }
             return 0;
@@ -3059,7 +3061,7 @@ static void spec_offset_check(void *ed) {
 
 #include "modules.inc"
 static void hook_refresh_inner(void *a1, float dt);
-static void hook_refresh(void *a1, float dt) { hook_refresh_inner(a1, dt); if (lay_of(a1)) { ovl_update(a1); spec_update(a1); mod_update(a1); un_tick(a1); pl_right_tick(a1); more_sync(a1); } }
+static void hook_refresh(void *a1, float dt) { hook_refresh_inner(a1, dt); if (lay_of(a1)) { kb_tick(a1); ovl_update(a1); spec_update(a1); mod_update(a1); un_tick(a1); pl_right_tick(a1); more_sync(a1); } }
 static void hook_refresh_inner(void *a1, float dt) {   // sub_1001B0AF0 = 毎フレーム update(dt)
     if (gPreview && a1 == gEditor) {
         ((void (*)(void *, float))VA(0x100075D2CULL))(a1, dt);   // 元の先頭呼び出し(基底の位置更新)
@@ -3107,7 +3109,7 @@ static intptr_t hook_zoom(void *a1, float z) {  // sub_1001B10C0 (zoom 変更: �
     if (gPreview && a1 == gEditor) ed_relayout(a1);
     return r;
 }
-// 順番の番号表示: 始点の位置に 1, 2, 3…(赤・大きめ)をテキストのモジュールで出す
+// 順番の番号表示: 始点の位置に、黒丸に白い 1, 2, 3…(動画のイメージ)をモジュール(丸 = sprite / 番号 = text)で出す
 static void ord_marks_refresh(void *ed) {
     for (BMMod *m in [gMods copy]) if ([m->name hasPrefix:@"bm-ord-"]) { mod_drop_node(m); [gMods removeObject:m]; }
     if (!gOrdNotes.count || !ed || !lay_of(ed) || !lay_of(ed)->slide) return;
@@ -3117,44 +3119,185 @@ static void ord_marks_refresh(void *ed) {
         uint8_t *n = (uint8_t *)[gOrdNotes[i] pointerValue];
         int den = *(int32_t *)(n + 64 + 12);
         double beat = *(int32_t *)(n + 64) + (den > 0 ? (double)*(int32_t *)(n + 64 + 8) / den : 0.0);
-        char nm[32], tx[16];
+        char nm[32], cn[32], tx[16];
+        snprintf(cn, sizeof cn, "bm-ord-c%lu", (unsigned long)i);
         snprintf(nm, sizeof nm, "bm-ord-%lu", (unsigned long)i);
         snprintf(tx, sizeof tx, "%lu", (unsigned long)i + 1);
-        mod_add(0, nm, tx);
-        mod_set_num(nm, "x", (n[128] + 0.5) * 100.0 / 256.0);
+        double mx = (n[128] + 0.5) * 100.0 / 256.0;
+        mod_add(1, cn, "bm-ord-circle");                      // 黒丸(自前のピクセル。画像ファイルは使わない)
+        BMMod *cm = mod_find([NSString stringWithUTF8String:cn]);
+        if (cm) {
+            const int S = 64;
+            free(cm->rgba);
+            cm->rgba = calloc((size_t)S * S, 4); cm->texW = cm->texH = S; cm->fallback = NO;
+            for (int yy = 0; yy < S; yy++) for (int xx = 0; xx < S; xx++) {
+                double d = hypot(xx + 0.5 - S / 2.0, yy + 0.5 - S / 2.0), a = fmin(1.0, fmax(0.0, S / 2.0 - 1.0 - d));   // 縁は 1px ぼかす
+                uint8_t *px = cm->rgba + ((size_t)yy * S + xx) * 4;
+                uint8_t v = d > S / 2.0 - 6.0 ? 255 : 0;                                                                // 外側 5px = 白の縁取り / 内側 = 黒
+                px[0] = px[1] = px[2] = (uint8_t)lround(v * a); px[3] = (uint8_t)lround(a * 255.0);                    // premultiplied
+            }
+        }
+        mod_set_num(cn, "x", mx); mod_set_num(cn, "beat", beat);
+        {   // 正円にする: 高さ(Height)は 1080 を基準にした単位(レーン幅 / 1080 倍)、幅(Width)はレーン幅に対する % なので、直径 D から両方を同じ長さに換算する
+            double D = 36.0;
+            mod_set_num(cn, "width", D * 100.0 / 1080.0); mod_set_num(cn, "height", D);
+        }
+        mod_add(0, nm, tx);                                   // 白い番号(丸の上)
+        mod_set_num(nm, "x", mx);
         mod_set_num(nm, "beat", beat);
-        mod_set_color(nm, 255, 50, 50);                       // 見やすいよう全部赤・大きめ
-        BMMod *om = mod_find([NSString stringWithUTF8String:nm]); if (om) om->fontMul = 2.2;
+        mod_set_color(nm, 255, 255, 255);
+        BMMod *om = mod_find([NSString stringWithUTF8String:nm]); if (om) om->fontMul = 1.3;
     }
     gPlEd = savedEd;
 }
-// 「順番に選択」中: 標準の処理で選択が更新された直後に、新しく選ばれたノートをタップ順に控える。何も無い所をタップ = リセット。控えたものは選択表示を保つ
-static void ord_track(void *ed, int ev) {
+// ---- 順番(Order)は通常の選択とは別のレイヤー ----
+// Order で選んだノートは、標準の選択(editor+1560)には入れず、本体 = 赤 / ほか = 青の色(スプライトの tint)と番号で表す。通常の選択(lasso など)はそのまま独立して使え、
+// GetSelectNotes と GetOrderNotes が混ざらない。標準の処理はタップしたノートを選択へ入れるので、その直後に選択から外し、見た目を通常へ戻してから色を付ける
+static NSMutableSet<NSValue *> *gOrdTinted;       // 色を付けているノート
+static NSMutableSet<NSValue *> *gOrdNormal;       // Order 中に控えている通常の選択(Order のタップと区別する)
+static void tint_tree(void *node, BOOL on, int r, int g, int b, int depth) {
+    if (!node || depth > 4) return;
+    if (cast_to(node, 0x1009647B0ULL)) {           // cocos2d::Sprite
+        if (on) { uint8_t col[32]; ((void (*)(void *, long, long, long))VA(0x1005545B8ULL))(col, r, g, b); VT(node, 1080, void (*)(void *, void *))(node, col); }
+        else VT(node, 1080, void (*)(void *, void *))(node, (void *)VA(0x1016CC9F8ULL));   // 白 = 元の色
+    }
+    nvec *ch = node_children(node);
+    if (ch && ch->begin && ch->end >= ch->begin && (ch->end - ch->begin) < 4096) for (void **p = ch->begin; p != ch->end; p++) tint_tree(*p, on, r, g, b, depth + 1);
+}
+static void ord_tint_sync(void *ed) {
+    if (!ed || !lay_of(ed)) return;
+    if (!gOrdTinted) gOrdTinted = [NSMutableSet set];
+    for (NSValue *t in [gOrdTinted copy]) {
+        if ([gOrdNotes containsObject:t]) continue;
+        void *sp = sprite_for_note(ed, t.pointerValue);
+        if (sp) tint_tree(sp, NO, 255, 255, 255, 0);
+        [gOrdTinted removeObject:t];
+    }
+    for (NSUInteger i = 0; i < gOrdNotes.count; i++) {
+        void *sp = sprite_for_note(ed, [gOrdNotes[i] pointerValue]);
+        if (!sp) continue;
+        if (i == 0) tint_tree(sp, YES, 255, 70, 70, 0); else tint_tree(sp, YES, 60, 170, 255, 0);
+        [gOrdTinted addObject:gOrdNotes[i]];
+    }
+}
+static void ord_normal_reset(void *ed) {           // Order を始める時点の通常の選択を控える
+    gOrdNormal = [NSMutableSet set];
+    if (!ed || !lay_of(ed)) return;
+    void **v = sel_vec(ed);
+    for (void **p = (void **)v[0]; p != (void **)v[1]; p++) { void *n = VT(*p, 704, void *(*)(void *))(*p); if (n) [gOrdNormal addObject:[NSValue valueWithPointer:n]]; }
+}
+static void ord_unsel(void *ed, void *sp) {         // 標準の選択解除(sub_1000C5954)と同じ手順で 1 つだけ外す: 選択から抜き、見た目(テクスチャ)を通常へ戻す
+    uint8_t *e = (uint8_t *)ed;
+    uint8_t *n = VT(sp, 704, uint8_t *(*)(void *))(sp);
+    void **sv = sel_vec(ed);
+    for (void **q = (void **)sv[0]; q != (void **)sv[1]; q++) {
+        if (*q != sp) continue;
+        memmove(q, q + 1, (size_t)((uint8_t *)sv[1] - (uint8_t *)(q + 1)));
+        sv[1] = (uint8_t *)sv[1] - 8;
+        break;
+    }
+    if (!n) return;
+    void **tb = *(void ***)(e + 1200), **te = *(void ***)(e + 1208);
+    long cnt = te - tb; uint32_t base = *(uint32_t *)(e + 1264);
+    int fl = *(int *)(n + 112);
+    if (fl & 0x800) {
+        void *path = cast_to(sp, 0x100922780ULL);       // PathSpriteEditor
+        uint32_t idx = base + 2;
+        if (path) ((void (*)(void *, void *))VA(0x100167BCCULL))(path, (long)idx < cnt ? tb[idx] : NULL);
+    } else {
+        void *s3 = cast_to(sp, 0x10090BE50ULL);         // Scale3Sprite
+        uint32_t idx = (fl & 0x400) ? base + 1 : base;
+        if (s3) VT(s3, 1224, void (*)(void *, void *))(s3, (long)idx < cnt ? tb[idx] : NULL);
+    }
+}
+// 標準の当たり判定は経路上の中継点(小さい丸)だけなので、選択から外した(見た目が通常に戻った)Order のスライドは狙いにくく、外すと「何も無い所のタップ」= リセットになってしまう。
+// 何も選ばれなかったタップは、スライドの経路(丸の列)の近くかを調べ、最寄りのスライドを押したものとして扱う
+static float gOrdMinD; static int gOrdNSlides;
+static void *ord_hit_slide(void *ed, const void *pos) {
+    typedef struct { float v[2]; uint64_t pad[2]; } V2Ret;
+    uint8_t *e = (uint8_t *)ed;
+    gOrdMinD = 1e9f; gOrdNSlides = 0;
+    if (!pos) return NULL;
+    void *cont = *(void **)(e + 1472);
+    V2Ret r = ((V2Ret (*)(void *, const void *))VA(0x100546980ULL))(cont, pos);   // 押した位置 → レーンの座標(標準のノート配置と同じ換算)
+    double xw = LF(ed, 1696), K = (double)LF(ed, 1716) * (double)LF(ed, 1720);
+    if (xw <= 0 || K <= 0) return NULL;
+    double tb = r.v[1] / K, u = r.v[0] * 255.0 / xw;                                // 拍 / 横位置(0〜255)
+    nvec *ch = node_children(cont);
+    if (!ch) return NULL;
+    void *best = NULL; double bs = 1e9;
+    for (void **p = ch->begin; p != ch->end; p++) {
+        uint8_t *n = VT(*p, 704, uint8_t *(*)(void *))(*p);
+        if (!n || !(n[113] & 8)) continue;
+        double head = note_beat(n, 64, 72, 76), end = note_beat(n, 88, 96, 100);
+        uint8_t *sb = *(uint8_t **)(n + 136), *se = *(uint8_t **)(n + 144);
+        long cnt = (se - sb) / 28;
+        if (cnt < 0 || cnt > 4096) continue;
+        double lastB = cnt ? head + note_beat(sb + 28 * (cnt - 1), 0, 8, 12) : head;
+        double maxB = fmax(end, lastB);
+        if (tb < head - 0.06 || tb > maxB + 0.06) continue;                        // 時間の範囲外
+        gOrdNSlides++;
+        double pb = head, px = 0, off = 0; BOOL found = NO;                        // 中継点の間は中心のずれを線形に補間
+        for (long i = 0; i < cnt; i++) {
+            double bb = head + note_beat(sb + 28 * i, 0, 8, 12), xx = (double)seg_x16(sb + 28 * i);
+            if (tb <= bb) { double t = bb > pb ? (tb - pb) / (bb - pb) : 1.0; off = px + (xx - px) * t; found = YES; break; }
+            pb = bb; px = xx;
+        }
+        if (!found) off = px;
+        double center = n[128] + off, w = n[129];                                  // +128 は中心 x(標準の配置は、幅の半分で端に収めた中心を入れる)/ +129 は幅
+        double d = fabs(u - center) - w / 2; if (d < 0) d = 0;
+        if (d < gOrdMinD) gOrdMinD = (float)d;
+        if (d > 6.0) continue;                                                     // 幅の外(余裕 6/255)
+        double score = fabs(u - center);
+        if (score < bs) { bs = score; best = n; }
+    }
+    return best;
+}
+// 「順番に選択」中: 標準の処理でタップしたノートが選択へ入った直後に、タップ順に控える(選択からは外す)。何も無い所をタップ = 順番をリセット
+static void ord_track(void *ed, int ev, const void *pos) {
     if (!gOrdMode || ed != gOrdEd || ev != 3 || !lay_of(ed)) return;   // タップの終わりで判定(選択は押下〜離しの間に更新される)
-    NSMutableArray<NSValue *> *cur = [NSMutableArray array];
+    if (!gOrdNormal) ord_normal_reset(NULL);
+    NSMutableArray<NSValue *> *fresh = [NSMutableArray array], *hit = [NSMutableArray array], *freshSp = [NSMutableArray array], *hitSp = [NSMutableArray array];
+    NSUInteger total = 0;
     void **v = sel_vec(ed);
     for (void **p = (void **)v[0]; p != (void **)v[1]; p++) {
         void *note = VT(*p, 704, void *(*)(void *))(*p);
-        if (note) [cur addObject:[NSValue valueWithPointer:note]];
+        if (!note) continue;
+        total++;
+        NSValue *nv = [NSValue valueWithPointer:note];
+        if ([gOrdNotes containsObject:nv]) { [hit addObject:nv]; [hitSp addObject:[NSValue valueWithPointer:*p]]; }
+        else if (![gOrdNormal containsObject:nv]) { [fresh addObject:nv]; [freshSp addObject:[NSValue valueWithPointer:*p]]; }
     }
-    NSMutableArray<NSValue *> *fresh = [NSMutableArray array];
-    for (NSValue *c in cur) if (![gOrdNotes containsObject:c]) [fresh addObject:c];
     char b[64];
+    os_log(L, "ord: tap total=%lu fresh=%lu hit=%lu order=%lu normal=%lu pos=(%.0f,%.0f)", (unsigned long)total, (unsigned long)fresh.count, (unsigned long)hit.count, (unsigned long)gOrdNotes.count, (unsigned long)gOrdNormal.count, pos ? ((const float *)pos)[0] : -1.f, pos ? ((const float *)pos)[1] : -1.f);
     if (fresh.count == 1) {                       // 新しく選んだ: タップ順に加える(1 番目 = 本体)
         [gOrdNotes addObject:fresh[0]];
         if (gOrdNotes.count == 1) snprintf(b, sizeof b, "Order 1 (main)");
         else snprintf(b, sizeof b, "Order %lu added", (unsigned long)gOrdNotes.count);
         ed_toast_text(ed, b, 4);
-    } else if (!cur.count && gOrdNotes.count) {   // 何も無い所をタップ: 順番を全部リセット(editor.html / Slide Editor の Order と同じ)
-        [gOrdNotes removeAllObjects];
-        ed_toast_text(ed, "Order reset", 4);
-    } else if (!fresh.count && cur.count == 1) {  // 選択済みを再タップ
+        [hit addObject:fresh[0]]; [hitSp addObject:freshSp[0]];
+    } else if (!total) {                          // 標準では何も選ばれなかったタップ
+        void *hn = ord_hit_slide(ed, pos);        // スライドの近く = そのスライドを押した扱い
+        os_log(L, "ord: miss -> near slide=%p minDist=%.1f slides=%d tool=%d", hn, gOrdMinD, gOrdNSlides, *(int *)((uint8_t *)ed + 1368));
+        if (hn) {
+            NSValue *nv = [NSValue valueWithPointer:hn];
+            if ([gOrdNotes containsObject:nv]) ed_toast_text(ed, "Already in order", 4);
+            else {
+                [gOrdNotes addObject:nv];
+                if (gOrdNotes.count == 1) snprintf(b, sizeof b, "Order 1 (main)");
+                else snprintf(b, sizeof b, "Order %lu added", (unsigned long)gOrdNotes.count);
+                ed_toast_text(ed, b, 4);
+            }
+        } else if (gOrdNotes.count) {             // 何も無い所をタップ: 順番を全部リセット(editor.html / Slide Editor の Order と同じ)
+            [gOrdNotes removeAllObjects];
+            ed_toast_text(ed, "Order reset", 4);
+        }
+    } else if (hit.count == 1 && !fresh.count) {  // 順番に入っているノートを再タップ
         ed_toast_text(ed, "Already in order", 4);
     }
-    for (NSValue *n in gOrdNotes) {               // 控えたものは選択表示を保つ
-        void *sp = sprite_for_note(ed, n.pointerValue);
-        if (sp) sel_add(ed, sp);
-    }
+    for (NSValue *sp in hitSp) ord_unsel(ed, sp.pointerValue);   // Order のノートは通常の選択に残さない
+    ord_normal_reset(ed);                         // いま残っている選択 = 通常の選択
+    ord_tint_sync(ed);
     ord_marks_refresh(ed);
 }
 static intptr_t hook_keytouch(void *a1, int ev, void *a3, void *pos) {   // sub_1001B1804
@@ -3173,7 +3316,7 @@ static intptr_t hook_keytouch(void *a1, int ev, void *a3, void *pos) {   // sub_
         }
     }
     intptr_t r = orig_keytouch(a1, ev, a3, pos);
-    ord_track(a1, ev);
+    ord_track(a1, ev, pos);
     return r;
 }
 static intptr_t hook_s_touch(void *a1, int ev, void *a3, void *pos) {   // sub_1000C6744 (EditorSlide)
@@ -3201,7 +3344,7 @@ static intptr_t hook_s_touch(void *a1, int ev, void *a3, void *pos) {   // sub_1
                    note_beat(selNote, 64, 72, 76), note_beat(selNote, 88, 96, 100), (long)((se - sb) / 28), se > sb ? note_beat(se - 28, 0, 8, 12) : -1.0, tb[880], *(void **)(tb + 1584) != NULL);
         } else os_log(L, "slide-sel: tool=%d sel %d->%d ret=%ld (non-path)", *(int *)(tb + 1368), selBefore, selAfter, (long)r);
     }
-    ord_track(a1, ev);
+    ord_track(a1, ev, pos);
     return r;
 }
 static keytouch_fn orig_snote;
@@ -3252,10 +3395,186 @@ static BOOL slide_remove_cut(void *ed, void *spr, void *pos) {
     os_log(L, "remove-cut: kept %ld of %ld segs (touch=%.3f head=%.3f)", k, cnt, tb, head);
     return YES;
 }
+// ---- #8 オプション: Slide の編集(設定画面 / その他メニューの Editor options で ON) ----
+// (1) Slide → Wipe(sub_1000C5E10): 標準は始点〜終点を分割グリッドで刻んで Wipe を作り直す。オプション ON は、始点と各 seg の位置(beat / x)のまま Wipe にする(Malody V と同じ)
+typedef void (*s2w_fn)(void *);
+static s2w_fn orig_s2wipe;
+static void hook_s2wipe(void *ed) {
+    const Lay *l = lay_of(ed);
+    if (!bm_opt(BMO_S2W) || !l || !l->slide) { orig_s2wipe(ed); return; }
+    uint8_t *e = (uint8_t *)ed;
+    void **sv = sel_vec(ed);
+    NSMutableArray<NSValue *> *slides = [NSMutableArray array];
+    for (void **p = (void **)sv[0]; p != (void **)sv[1]; p++) {
+        uint8_t *n = VT(*p, 704, uint8_t *(*)(void *))(*p);
+        if (n && (n[113] & 8)) [slides addObject:[NSValue valueWithPointer:n]];
+    }
+    if (!slides.count) { orig_s2wipe(ed); return; }                 // 選択が無い / Slide 以外 = 標準のメッセージ
+    typedef void *(*new_fn)(size_t);
+    static new_fn nw;
+    if (!nw) nw = (new_fn)dlsym(RTLD_DEFAULT, "_Znwm");
+    NSMutableArray<NSValue *> *wipes = [NSMutableArray array];
+    for (NSValue *sn in slides) {
+        uint8_t *n = sn.pointerValue;
+        Rat head = rat_of(n + 64);
+        uint8_t *sb = *(uint8_t **)(n + 136), *se = *(uint8_t **)(n + 144);
+        long cnt = (se - sb) / 28;
+        if (cnt < 0 || cnt > 4096) continue;
+        for (long i = -1; i < cnt; i++) {                              // -1 = 始点
+            Rat at = i < 0 ? head : rat_add(head, rat_of(sb + 28 * i));
+            int x = n[128] + (i < 0 ? 0 : seg_x16(sb + 28 * i));
+            if (at.n < 0) continue;
+            uint8_t *w = nw(0x88);
+            memset(w, 0, 0x88);
+            ((void (*)(void *))VA(0x1001EBC08ULL))(w);                 // HitObjectWipe の初期化
+            *(int32_t *)(w + 112) = 1024;
+            w[128] = (uint8_t)(x < 0 ? 0 : (x > 255 ? 255 : x)); w[129] = n[129];
+            beat_write_rat(w + 64, at); beat_write_rat(w + 88, at);
+            int ms = (int)time_of(w + 56);
+            *(int32_t *)(w + 80) = ms; *(int32_t *)(w + 104) = ms;
+            [wipes addObject:[NSValue valueWithPointer:w]];
+        }
+    }
+    for (NSValue *sn in slides) {                                       // 元のスライドを消す(標準の削除と同じ手順)
+        uint8_t *n = sn.pointerValue;
+        void *sp = sprite_for_note(ed, n);
+        if (sp && *(void **)(e + 1584) == sp) *(void **)(e + 1584) = NULL;
+        ((void (*)(void *, void *, int, int))VA(0x1000C79F8ULL))(ed, n, 1, 0);
+    }
+    *(void **)(e + 1568) = *(void **)(e + 1560);                        // 選択を空に
+    void *snd = *(void **)(e + 1080), *chart = *(void **)(e + 1592);
+    for (NSValue *wv in wipes) {
+        uint8_t *w = wv.pointerValue;
+        ((void (*)(void *, void *))VA(0x1001C6834ULL))(chart, w);
+        ((void (*)(void *, void *))VA(0x1000C8A68ULL))(ed, w);
+        ((void (*)(void *, long))VA(0x10006C1ECULL))(snd, *(int32_t *)(w + 80));
+        VT(ed, 1648, void (*)(void *, void *))(ed, w);
+    }
+    ((void (*)(void *))VA(0x10006C288ULL))(snd);
+    char b[64]; snprintf(b, sizeof b, "Slide -> Wipe: %lu notes", (unsigned long)wipes.count);
+    ed_toast_text(ed, b, 4);
+    os_log(L, "slide2wipe: %lu slides -> %lu wipes", (unsigned long)slides.count, (unsigned long)wipes.count);
+}
+// (2) seg の追加(sub_1000C6CA8): 標準は、選択中(編集中)のスライドの終点 beat 以前をタップすると「選択解除」。オプション ON は、始点より後ろなら、終点より前でも seg を足す(時系列でない seg)。
+// 始点以前のタップは標準どおり選択解除。標準は終点が押した位置より前のときだけ seg を足すので、足す間だけ終点を始点に下げて標準の処理を通し、終わったら元の終点へ戻す
+typedef void (*segadd_fn)(void *, uint32_t, double);
+static segadd_fn orig_segadd;
+static void hook_segadd(void *ed, uint32_t x, double beat) {
+    const Lay *l = lay_of(ed);
+    if (bm_opt(BMO_SEG_ANY) && l && l->slide) {
+        uint8_t *e = (uint8_t *)ed;
+        void *spr = *(void **)(e + 1584);
+        void **sv = sel_vec(ed);
+        if (((uint8_t *)sv[1] - (uint8_t *)sv[0]) == 8) { void *pp = cast_to(*(void **)sv[0], 0x100922780ULL); if (pp) spr = pp; }   // 選択が PathSpriteEditor 1 つ
+        uint8_t *n = spr ? VT(spr, 704, uint8_t *(*)(void *))(spr) : NULL;
+        if (n && (n[113] & 8)) {
+            double head = note_beat(n, 64, 72, 76), end = note_beat(n, 88, 96, 100);
+            if (beat > head + 1e-9 && beat <= end) {
+                uint8_t save[24]; memcpy(save, n + 88, 24);
+                beat_write_rat(n + 88, rat_of(n + 64));                 // 終点 = 始点(標準から見て「押した位置が終点より後」)
+                orig_segadd(ed, x, beat);
+                memcpy(n + 88, save, 24);                               // 終点は元のまま(最も遅い seg の beat)
+                os_log(L, "seg-any: added seg at %.4f (end %.4f)", beat, end);
+                return;
+            }
+        }
+    }
+    orig_segadd(ed, x, beat);
+}
+// 標準の seg 追加は、押した位置に既にノートがあると(sub_1001C8F60)何もしない。編集中のスライド自身の本体(幅の中)も「ノートあり」と判定されるので、時系列でない seg を
+// 自分の本体の上に置こうとしても、置けたり置けなかったりしていた。ツールが slide(81 / 84)で編集中のスライド自身が当たったときは「なし」と答える
+typedef void *(*chit_fn)(void *, long, double);
+static chit_fn orig_chit;
+static void *hook_chit(void *chart, long lane, double beat) {
+    void *r = orig_chit(chart, lane, beat);
+    if (r && gEditor && bm_opt(BMO_SEG_ANY) && lay_of(gEditor) && lay_of(gEditor)->slide) {
+        uint8_t *e = (uint8_t *)gEditor;
+        int tool = *(int *)(e + 1368);
+        if (tool == 81 || tool == 84) {
+            void *spr = *(void **)(e + 1584);
+            void **sv = sel_vec(gEditor);
+            if (((uint8_t *)sv[1] - (uint8_t *)sv[0]) == 8) { void *pp = cast_to(*(void **)sv[0], 0x100922780ULL); if (pp) spr = pp; }
+            uint8_t *n = spr ? VT(spr, 704, uint8_t *(*)(void *))(spr) : NULL;
+            if (n && (n[113] & 8) && (void *)n == r) return NULL;
+        }
+    }
+    return r;
+}
+// (3) seg を縦方向(beat)にも動かす: 標準の seg の移動は横(x)だけ。ドラッグを離した位置の beat(現在の分割に切り捨て)を、動かした seg の beat にする。
+// 時系列でない seg を許可していないときは、前後の seg の beat の間に収める。始点より前にはしない。スプライトは、タッチの処理が終わってから作り直す
+static void seg_vert_commit(void *ed, void *spr, const void *pos) {
+    uint8_t *e = (uint8_t *)ed;
+    void *path = cast_to(spr, 0x100922780ULL);
+    uint8_t *n = VT(spr, 704, uint8_t *(*)(void *))(spr);
+    if (!path || !n || !(n[113] & 8) || !pos) return;
+    int idx = *(int *)((uint8_t *)path + 696);                          // 動かした seg の番号(標準が押下で決める。-1 = なし)
+    uint8_t *sb = *(uint8_t **)(n + 136), *se = *(uint8_t **)(n + 144);
+    long cnt = (se - sb) / 28;
+    if (idx < 0 || idx >= cnt || cnt > 4096) return;
+    typedef struct { float v[2]; uint64_t pad[2]; } V2Ret;
+    V2Ret r = ((V2Ret (*)(void *, const void *))VA(0x100546980ULL))(*(void **)(e + 1472), pos);
+    double K = (double)LF(ed, 1716) * (double)LF(ed, 1720);
+    int div = e[1713]; if (div < 1) div = 1;
+    if (K <= 0) return;
+    int64_t q = (int64_t)floor(r.v[1] / K * div + 1e-9);
+    Rat head = rat_of(n + 64), abs = { q, div };
+    Rat rel = rat_add(abs, rat_neg(head));
+    double headD = rat_dbl(head), absD = rat_dbl(abs);
+    if (absD < headD) rel = (Rat){ 0, 1 };                              // 始点より前にはしない
+    if (!bm_opt(BMO_SEG_ANY)) {                                         // 時系列を保つ: 前後の seg の間
+        double lo = idx > 0 ? note_beat(sb + 28 * (idx - 1), 0, 8, 12) : 0.0, hi = idx + 1 < cnt ? note_beat(sb + 28 * (idx + 1), 0, 8, 12) : 1e9, cur = rat_dbl(rel);
+        if (cur < lo) rel = rat_of(sb + 28 * (idx - 1));
+        else if (cur > hi) rel = rat_of(sb + 28 * (idx + 1));
+    }
+    uint8_t *seg = sb + 28 * idx;
+    Rat was = rat_of(seg);
+    if (was.n * rel.d == rel.n * was.d) return;                         // beat が変わらない(横だけ動かした)
+    beat_write_rat(seg, rel);
+    {   // 時間(seg の +16 = 始点からの ms)
+        uint8_t tmp[40]; memset(tmp, 0, sizeof tmp);
+        beat_write_rat(tmp + 8, rat_add(head, rel));
+        *(int32_t *)(seg + 16) = (int)time_of(tmp) - *(int32_t *)(n + 80);
+    }
+    double mx = 0; Rat endr = head;                                     // 終点 = 最も遅い seg
+    for (long i = 0; i < cnt; i++) { double b = note_beat(sb + 28 * i, 0, 8, 12); if (b >= mx) { mx = b; endr = rat_add(head, rat_of(sb + 28 * i)); } }
+    beat_write_rat(n + 88, endr);
+    os_log(L, "seg-vert: seg %d beat %.4f -> %.4f", idx, rat_dbl(was), rat_dbl(rel));
+    NSValue *nv = [NSValue valueWithPointer:n];
+    dispatch_async(dispatch_get_main_queue(), ^{                        // タッチの処理が終わってからスプライトを作り直す
+        if (gEditor != ed) return;
+        void *saved = gPlEd; gPlEd = ed;
+        pl_seg_touch(nv.pointerValue);
+        pl_rebuild_dirty();
+        gPlEd = saved;
+        *((uint8_t *)ed + 883) = 1;
+        un_mark();
+    });
+}
+// (4) seg の選び方: 標準は「押した位置に最初に当たった seg」。オプション ON は、押した位置に最も近い seg(丸)を選ぶ
+static void seg_pick_nearest(void *ed, void *spr, const void *pos) {
+    void *path = cast_to(spr, 0x100922780ULL);
+    if (!path || !pos) return;
+    uint8_t *pp = (uint8_t *)path;
+    void **cb = *(void ***)(pp + 712), **ce = *(void ***)(pp + 720);    // seg の丸(0 = 始点)
+    if (!cb || cb >= ce || (ce - cb) > 4097) return;
+    typedef struct { float v[2]; uint64_t pad[2]; } V2Ret;
+    V2Ret r = ((V2Ret (*)(void *, const void *))VA(0x100546980ULL))(path, pos);
+    int best = -1; float bd = 80.0f;
+    for (void **c = cb + 1; c != ce; c++) {
+        float dx = r.v[0] - VT(*c, 192, float (*)(void *))(*c), dy = r.v[1] - VT(*c, 208, float (*)(void *))(*c);
+        float d = sqrtf(dx * dx + dy * dy);
+        if (d < bd) { bd = d; best = (int)(c - cb) - 1; }
+    }
+    if (best >= 0) { os_log(L, "seg-hit: stock idx=%d nearest=%d d=%.1f", *(int *)(pp + 696), best, bd); *(int *)(pp + 696) = best; }
+}
 static intptr_t hook_s_note(void *a1, int ev, void *a3, void *pos) {   // sub_1000C7224: ノート自身へのタッチ(選択・移動)。順番に選択はここで選択が更新された後に控える
     if (ev == 0 && a3 && bm_opt(BMO_REMOVE_CUT) && slide_remove_cut(a1, a3, pos)) return 0;
     intptr_t r = orig_snote(a1, ev, a3, pos);
-    ord_track(a1, ev);
+    if (a3 && lay_of(a1) && lay_of(a1)->slide && *(int *)((uint8_t *)a1 + 1368) == 84) {   // Slide modify(ツール 84)
+        if (ev == 0 && bm_opt(BMO_SEG_HIT)) seg_pick_nearest(a1, a3, pos);
+        if (ev == 2 && bm_opt(BMO_SEG_VERT)) seg_vert_commit(a1, a3, pos);
+    }
+    ord_track(a1, ev, pos);
     return r;
 }
 // 標準のノートの並び順(Wipe→Slide の seg 順など): 同じ小節内の比較で num * den が 32bit を超えると順序が壊れる(分母 1048576 の wipe)。64bit で比べ直す
@@ -3302,7 +3621,7 @@ static void slide_grid_keep(void *ed) {
     }
     if (g[0] != sv[0] || g[1] != sv[1]) { sv[0] = g[0]; sv[1] = g[1]; have = YES; os_log(L, "grid: saved align=%d lines=%d", sv[0], sv[1]); }
 }
-static void hook_s_refresh(void *a1, float dt) { hook_s_refresh_inner(a1, dt); if (lay_of(a1)) { ovl_update(a1); spec_update(a1); mod_update(a1); un_tick(a1); slide_grid_keep(a1); pl_right_tick(a1); more_sync(a1); } }
+static void hook_s_refresh(void *a1, float dt) { hook_s_refresh_inner(a1, dt); if (lay_of(a1)) { kb_tick(a1); ovl_update(a1); spec_update(a1); mod_update(a1); un_tick(a1); slide_grid_keep(a1); pl_right_tick(a1); more_sync(a1); { static int f; if ((++f % 10) == 0 && (gOrdNotes.count || gOrdTinted.count)) ord_tint_sync(a1); } } }
 static void hook_s_refresh_inner(void *a1, float dt) {   // sub_1000C5408 = EditorSlide update
     if (gPreview) {
         static int cnt; static double lastPos = -1e9;
@@ -3539,6 +3858,9 @@ __attribute__((constructor)) static void bm_init(void) {
     orig_tgridpos = (tgridpos_fn)VA(0x100005398ULL); slots[40] = (void *)hook_tgridpos;     // tgridpos(cave 0x100005388 + 16): Taiko のグリッド位置
     orig_pathhit = (pathhit_fn)VA(0x1000053C8ULL); slots[42] = (void *)hook_pathhit;          // pathhit(cave 0x1000053B8 + 16): 重複 beat のスライドの当たり判定の誤判定を外す
     slots[43] = (void *)hook_notecmp;                                                              // notecmp(cave 0x1000053D0): 分数の比較を 64bit に
+    orig_chit = (chit_fn)VA(0x100005428ULL); slots[46] = (void *)hook_chit;                           // chit(cave 0x100005418 + 16)
+    orig_s2wipe = (s2w_fn)VA(0x1000053F8ULL); slots[44] = (void *)hook_s2wipe;                     // s2wipe(cave 0x1000053E8 + 16)
+    orig_segadd = (segadd_fn)VA(0x100005410ULL); slots[45] = (void *)hook_segadd;                  // segadd(cave 0x100005400 + 16)
     orig_snote = (keytouch_fn)VA(0x1000053B0ULL); slots[41] = (void *)hook_s_note;               // snote(cave 0x1000053A0 + 16): Slide のノートへのタッチ
     {
         NSUserDefaults *u = NSUserDefaults.standardUserDefaults;

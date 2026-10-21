@@ -350,8 +350,10 @@ static int e_CallShortcut(lua_State *L) {
     if (H->shortcut) H->shortcut((int)luaL_checkinteger(L, ARG(1)));
     return 0;
 }
-static int e_Unsupported(lua_State *L) {   // 未対応 API は例外にせず無視する(プラグイン全体が止まらないように)
-    (void)L; return 0;
+static int e_Unsupported(lua_State *L) {   // 未対応 API は例外にせず無視する(プラグイン全体が止まらないように)。呼ばれたことはログへ出す
+    const char *nm = lua_tostring(L, lua_upvalueindex(1));
+    if (nm && H && H->log) { char b[96]; snprintf(b, sizeof b, "unsupported API ignored: Editor:%s", nm); H->log(b); }
+    return 0;
 }
 
 // ---- 補助 ----
@@ -612,6 +614,8 @@ static const luaL_Reg kEditor[] = {
 static void install(lua_State *L) {
     lua_newtable(L);
     luaL_setfuncs(L, kEditor, 0);
+    for (const luaL_Reg *r = kEditor; r->name; r++)
+        if (r->func == e_Unsupported) { lua_pushstring(L, r->name); lua_pushcclosure(L, e_Unsupported, 1); lua_setfield(L, -2, r->name); }
     lua_setglobal(L, "Editor");
     lua_newtable(L);
     lua_pushcfunction(L, r_SetResult); lua_setfield(L, -2, "SetResult");

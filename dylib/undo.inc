@@ -39,8 +39,18 @@ static NSMutableDictionary<NSNumber *, NSMutableData *> *gUnMask;   // vtable �
 static BOOL gUnTouched, gUnDirty, gUnBusy;
 static CFAbsoluteTime gUnDirtyT;
 static NSUInteger gUnBaseCount;
+static int gUnMode;                                   // 0 Key / 1 Slide / 2 Taiko(履歴を取った時のエディタの種類)
 
-static void un_mark(void) { gUnTouched = YES; gUnDirty = YES; gUnDirtyT = CFAbsoluteTimeGetCurrent(); }
+// エディタを抜けて(プレビュー再生など)入り直しても履歴を残す: 抜けた時の履歴を「預かり」に置き、入り直した譜面が同じ内容なら引き継ぐ。
+// ノートのポインタは作り直されるので、(種類・拍・位置などの)中身のキーで並べて 1 対 1 に対応づけ、UnNode の ptr だけ付け替える。
+// 内容が違う(別の譜面 / 抜けている間に変わった)ときは捨てる。アプリを終了するまでの間だけ保つ。
+@interface UnKeep : NSObject { @public NSMutableArray<UnNode *> *nodes; NSMutableArray<UnEntry *> *undo, *redo; NSArray<NSData *> *fx, *bpm; NSDictionary *meta; int mode; }
+@end
+@implementation UnKeep
+@end
+static UnKeep *gUnKeep;
+
+static void un_mark(void) { gUnTouched = YES; gUnDirty = YES; gUnDirtyT = CFAbsoluteTimeGetCurrent(); gUnKeep = nil; }
 static NSNumber *un_key(const void *p) { return @((uintptr_t)p); }
 static NSArray<NSValue *> *un_live(void *ed, BOOL *ok) {   // 画面のノートコンテナの子(スプライト)が持つノートを重複なしで列挙
     NSMutableArray *a = [NSMutableArray array];
@@ -284,16 +294,90 @@ static void un_info_boxes_refresh(void *ed) {
 static void un_reset(void) {
     gUnNodes = [NSMutableDictionary dictionary];
     gUnUndo = [NSMutableArray array]; gUnRedo = [NSMutableArray array];
-    gUnMask = [NSMutableDictionary dictionary];
+    if (!gUnMask) gUnMask = [NSMutableDictionary dictionary];   // 学習済みのノイズ語は、エディタを入り直しても同じ(vtable ごと)
     gUnFx = nil; gUnBpm = nil; gUnMeta = nil; gUnBaseCount = 0; gUnDirty = NO; gUnTouched = NO;
+}
+static int un_mode_of(void *ed) { return is_taiko(ed) ? 2 : (lay_of(ed) && lay_of(ed)->slide ? 1 : 0); }
+static NSData *un_note_key(const uint8_t *n, int mode) {   // 譜面を読み直しても変わらない値だけのキー(ポインタ・状態ビットは含めない)
+    NSMutableData *d = [NSMutableData dataWithCapacity:80];
+    uint64_t vt = *(uint64_t *)n;
+    [d appendBytes:&vt length:8];
+    static const int offs[] = { 64, 72, 76, 88, 96, 100 };
+    for (size_t i = 0; i < sizeof offs / sizeof *offs; i++) [d appendBytes:n + offs[i] length:4];
+    uint8_t f[4] = { (uint8_t)(mode == 0 ? (n[112] & 0x80) : 0), (uint8_t)(mode == 1 ? (n[113] & 8) : 0), n[128], n[129] };
+    [d appendBytes:f length:4];
+    if (mode == 2) [d appendBytes:n + 148 length:4];
+    if (mode == 1 && (n[113] & 8)) {
+        const uint8_t *b = *(uint8_t **)(n + 136), *e = *(uint8_t **)(n + 144);
+        int cnt = 0;
+        for (; b && b != e && cnt < 6000; b += 28, cnt++) { [d appendBytes:b length:4]; [d appendBytes:b + 8 length:8]; [d appendBytes:b + 24 length:1]; }
+    }
+    return d;
+}
+static NSComparisonResult un_data_cmp(NSData *a, NSData *b) {
+    size_t n = MIN(a.length, b.length);
+    int c = memcmp(a.bytes, b.bytes, n);
+    if (c) return c < 0 ? NSOrderedAscending : NSOrderedDescending;
+    return a.length == b.length ? NSOrderedSame : (a.length < b.length ? NSOrderedAscending : NSOrderedDescending);
+}
+static BOOL un_blobs_eq(NSArray<NSData *> *a, NSArray<NSData *> *b) {   // effect / BPM の生データ: ポインタらしい語(作り直しで変わる)は無視
+    if (a.count != b.count) return NO;
+    for (NSUInteger i = 0; i < a.count; i++) {
+        if (a[i].length != b[i].length) return NO;
+        const uint64_t *x = a[i].bytes, *y = b[i].bytes;
+        for (size_t w = 1; w < a[i].length / 8; w++) if (x[w] != y[w] && !(un_ptrlike(x[w]) && un_ptrlike(y[w]))) return NO;
+    }
+    return YES;
+}
+static void un_stash(void) {   // 抜けたエディタの履歴を預かる
+    UnKeep *k = [UnKeep new];
+    k->nodes = [NSMutableArray array];
+    for (UnNode *nd in [gUnNodes allValues]) if (nd->ptr && nd->shadow) [k->nodes addObject:nd];
+    k->undo = gUnUndo; k->redo = gUnRedo; k->fx = gUnFx; k->bpm = gUnBpm; k->meta = gUnMeta; k->mode = gUnMode;
+    gUnKeep = k;
+    os_log(L, "undo: kept %lu undo / %lu redo, %lu notes", (unsigned long)k->undo.count, (unsigned long)k->redo.count, (unsigned long)k->nodes.count);
+}
+static BOOL un_keep_adopt(void *ed, NSArray *live) {   // 入り直した譜面が預かった状態と同じなら引き継ぐ。まだ読み込み中(件数が少ない)なら待つ
+    UnKeep *k = gUnKeep;
+    int mode = un_mode_of(ed);
+    if (k->mode != mode || live.count > k->nodes.count) { os_log(L, "undo: keep dropped (mode/count: %lu vs %lu)", (unsigned long)live.count, (unsigned long)k->nodes.count); gUnKeep = nil; return NO; }
+    if (live.count < k->nodes.count) return NO;
+    NSMutableArray *olds = [NSMutableArray array], *news = [NSMutableArray array];
+    for (UnNode *nd in k->nodes) [olds addObject:@[ un_note_key(nd->shadow, mode), nd ]];
+    for (NSValue *v in live) [news addObject:@[ un_note_key(v.pointerValue, mode), v ]];
+    NSComparisonResult (^cmp)(NSArray *, NSArray *) = ^NSComparisonResult(NSArray *a, NSArray *b) { return un_data_cmp(a[0], b[0]); };
+    [olds sortUsingComparator:cmp];
+    [news sortUsingComparator:cmp];
+    for (NSUInteger i = 0; i < olds.count; i++)
+        if (![olds[i][0] isEqualToData:news[i][0]]) { os_log(L, "undo: keep dropped (note %lu differs)", (unsigned long)i); gUnKeep = nil; return NO; }
+    NSArray<NSData *> *fx = un_fx_read(), *bpm = un_bpm_read();
+    NSDictionary *meta = un_meta_read(ed);
+    if (!un_blobs_eq(fx, k->fx) || !un_blobs_eq(bpm, k->bpm) || (mode != 2 && ![meta isEqualToDictionary:k->meta])) {
+        os_log(L, "undo: keep dropped (effects/bpm/info differ)"); gUnKeep = nil; return NO;
+    }
+    gUnNodes = [NSMutableDictionary dictionary];
+    for (NSUInteger i = 0; i < olds.count; i++) {
+        UnNode *nd = olds[i][1];
+        nd->ptr = [news[i][1] pointerValue];
+        gUnNodes[un_key(nd->ptr)] = nd;
+    }
+    gUnUndo = k->undo; gUnRedo = k->redo;
+    gUnFx = fx; gUnBpm = bpm; gUnMeta = meta;
+    gUnEd = ed; gUnMode = mode; gUnBaseCount = live.count; gUnDirty = NO; gUnTouched = YES;
+    gUnKeep = nil;
+    os_log(L, "undo: restored %lu undo / %lu redo, %lu notes", (unsigned long)gUnUndo.count, (unsigned long)gUnRedo.count, (unsigned long)live.count);
+    return YES;
 }
 static void un_baseline(void *ed) {
     BOOL ok;
     NSArray *live = un_live(ed, &ok);
     if (!ok) return;
+    gOuter = *(void **)((uint8_t *)ed + 0x2d8);
+    if (gUnEd && gUnEd != ed && (gUnUndo.count || gUnRedo.count)) un_stash();
+    if (gUnKeep && un_keep_adopt(ed, live)) return;
     un_reset();
     gUnEd = ed;
-    gOuter = *(void **)((uint8_t *)ed + 0x2d8);
+    gUnMode = un_mode_of(ed);
     for (NSValue *v in live) {
         UnNode *nd = [UnNode new];
         nd->ptr = v.pointerValue;
@@ -357,6 +441,11 @@ static void un_checkpoint(void *ed) {
     UnEntry *en = [UnEntry new];
     en->ops = [NSMutableArray array];
     NSMutableSet<NSNumber *> *liveSet = [NSMutableSet setWithCapacity:live.count];
+    if (gUnNodes.count > 3 && live.count > 3) {   // 記録済みのノートが 1 つも画面に無い = エディタが同じ番地に作り直された: 履歴を預けて取り直す
+        NSUInteger hit = 0;
+        for (NSValue *v in live) if (gUnNodes[un_key(v.pointerValue)]) { hit = 1; break; }
+        if (!hit) { gUnEd = (void *)1; un_baseline(ed); return; }
+    }
     for (NSValue *v in live) {
         uint8_t *p = v.pointerValue;
         NSNumber *k = un_key(p);

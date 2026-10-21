@@ -453,6 +453,7 @@ static void taiko_add_menu_items(void *self) {
     add_menu_item(tb, "ui-edit-icon1.png", BM_TAG_THC, "HS clear (range)");
     add_menu_item(tb, "ui-edit-icon1.png", BM_TAG_THL, "HS labels (show values)");
     add_menu_item(tb, "ui-edit-icon26.png", BM_TAG_TPM, "Paste mirrored (don/ka)");
+    add_menu_item(tb, "ui-edit-icon28.png", BM_TAG_PDEV, "Plugin Dev...");
 }
 // 右ツールメニューのボタン(tag 88)/ 他のツール選択でのモード解除。hook_touch から呼ぶ(戻り値 1 = 処理した)
 // 反転ペースト: 標準の貼り付け(vtable +1728)を使い、クリップボード内の don/ka(種類 0↔2, 1↔3)を入れ替えてから貼る。貼った後はクリップボードを元に戻す

@@ -46,6 +46,7 @@
 #define BM_TAG_MORE_FX    701   // 選択メニューの項目 = effect リスト
 #define BM_TAG_MORE_BPM   702   // 選択メニューの項目 = BPM リスト(元の動作)
 #define BM_TAG_PLUGINS    766   // 選択メニューの項目 = Lua プラグイン管理
+#define BM_TAG_PDEV       774   // その他 > Plugin Dev(ログ / Lua コンソール)
 #define BM_TAG_CHOICE_BACK 773  // 選択メニュー(BPM / Effect / Plugins / Folder)の Back = メニューを閉じる
 #define BM_TAG_FOLDER     767   // 選択メニューの項目 = 曲フォルダをファイル App / Finder で開く
 #define BM_TAG_BPM_ICON   18    // 右のツールバーの2番目(メトロノーム)= 元はBPMリストを開く
@@ -1966,6 +1967,7 @@ static void sel_add_menu_items(void *self) {   // 「その他」メニューに
     add_menu_item(tb, "ui-edit-icon14.png", BM_TAG_CAT_MOVE, "Move >");
     add_menu_item(tb, "ui-edit-icon1.png", BM_TAG_CAT_EFFECT, "Effect >");
     add_menu_item(tb, "ui-edit-icon26.png", BM_TAG_CAT_SPEC, "Spectrogram >");
+    add_menu_item(tb, "ui-edit-icon28.png", BM_TAG_PDEV, "Plugin Dev...");
 }
 
 // ---- 汎用スライダーダイアログ(ゲーム標準の編集中断ダイアログ script_editpause.mui と同じ見た目: 中央のパネルにゲージ最大 2 本)----
@@ -2199,6 +2201,10 @@ static intptr_t hook_touch(void *self, int ev, void *node, void *pos) {
         }
         if ((tag == BM_TAG_UNDO || tag == BM_TAG_REDO) && (lay_of(self) || is_taiko(self))) {   // 右バーの取り消し / やり直し
             if (ev == 3) { gEditor = self; un_do(self, tag == BM_TAG_UNDO); }
+            return 0;
+        }
+        if (tag == BM_TAG_PDEV && (lay_of(self) || is_taiko(self))) {             // 「その他 > Plugin Dev」: ログ / Lua コンソール
+            if (ev == 3) { gEditor = self; os_log(L, "plugin dev: open"); dispatch_async(dispatch_get_main_queue(), ^{ pl_dev_menu(); }); }
             return 0;
         }
         if (tag == BM_TAG_FOLDER && (lay_of(self) || is_taiko(self))) {           // 「その他 > Folder」: 曲のフォルダを開く

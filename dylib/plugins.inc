@@ -549,9 +549,37 @@ static void h_cur_beat(LHBeat *o) {
 }
 static double h_cur_time(void) { return ((double (*)(void *))VA(0x100021B8CULL))((uint8_t *)gPlEd + 744); }
 static int h_cur_div(void) { return cur_div(gPlEd); }
+// ---- 開発者向けのログ: print / エラー(ファイル名:行番号つき)/ 未対応 API の呼び出し / ShowMessage を控える。
+// 「その他 > Plugin Dev」で見る・コピーする・Lua を 1 行実行する。Documents/plugin_log.txt にも書く(ファイルアプリで開ける)
+static NSMutableArray<NSString *> *gPlLogBuf;
+static void pl_log_add(NSString *line) {
+    if (!line.length) return;
+    if (!gPlLogBuf) gPlLogBuf = [NSMutableArray array];
+    NSString *name = gPlCurPath.lastPathComponent ?: @"-";
+    NSString *body = [NSString stringWithFormat:@"[%@] %@", name, line];
+    if ([gPlLogBuf.lastObject hasSuffix:body]) return;                    // 連続する同じ行は 1 回だけ
+    static NSDateFormatter *df;
+    if (!df) { df = [NSDateFormatter new]; df.dateFormat = @"HH:mm:ss"; }
+    NSString *full = [NSString stringWithFormat:@"%@ %@", [df stringFromDate:[NSDate date]], body];
+    [gPlLogBuf addObject:full];
+    if (gPlLogBuf.count > 400) [gPlLogBuf removeObjectsInRange:NSMakeRange(0, gPlLogBuf.count - 400)];
+    static NSString *path;
+    if (!path) path = [[NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject ?: @"" stringByAppendingPathComponent:@"plugin_log.txt"] copy];
+    @try {
+        NSFileManager *fm = [NSFileManager defaultManager];
+        if (![fm fileExistsAtPath:path]) [fm createFileAtPath:path contents:nil attributes:nil];
+        else if ([[fm attributesOfItemAtPath:path error:nil] fileSize] > 512 * 1024) [@"" writeToFile:path atomically:NO encoding:NSUTF8StringEncoding error:nil];
+        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
+        [fh seekToEndOfFile];
+        [fh writeData:[[full stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding]];
+        [fh closeFile];
+    } @catch (NSException *ex) {}
+}
 static void h_toast(const char *m) {      // 同じ文面の連発(OnDragMove ごとの ShowMessage など)は 1 秒間は出さない
     static NSString *last; static CFAbsoluteTime at;
     NSString *t = [NSString stringWithUTF8String:m] ?: @"";
+    pl_log_add([@"msg: " stringByAppendingString:t]);
+    
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
     if (last && [last isEqualToString:t] && now - at < 1.0) return;
     last = t; at = now;
@@ -878,7 +906,7 @@ static void h_batch(int begin) { (void)begin; }   // 変更ごとに個別の Un
 
 // 未挿入のノートをエディタへ挿入する(元の貼り付けと同じ手順)
 // ---- print / ReadChartCustom / WriteChartCustom / DoRequest ----
-static void h_log(const char *t) { os_log(L, "plugin: %{public}s", t); }
+static void h_log(const char *t) { os_log(L, "plugin: %{public}s", t); pl_log_add([NSString stringWithUTF8String:t] ?: @""); }
 static NSString *gPlCustomVal;
 static NSString *pl_custom_path(void) {
     NSString *dir = pl_chart_dir();
@@ -1298,6 +1326,7 @@ static void pl_session_end(void *ed, int rc, const char *err, BOOL quiet) {
     if (gPlEdits && is_taiko(ed)) un_mark();
     if (gPreview && ed == gEditor && gPlEdits) ed_relayout(ed);
     if (rc != 0) {
+        pl_log_add([NSString stringWithFormat:@"ERROR %s", err]);
         char b[140]; snprintf(b, sizeof b, "Plugin error: %.110s", err);
         ed_toast_text(ed, b, 2);
         os_log(L, "plugin error: %{public}s", err);
@@ -1491,7 +1520,7 @@ static void pl_run(void *ed, NSUInteger idx) {
     if (idx >= gPlFiles.count) return;
     const LHInfo *in = pl_info(idx);
     gPlCurPath = gPlFiles[idx];
-    if (in->err[0]) { ed_toast_text(ed, "Plugin: load error (see log)", 2); os_log(L, "plugin error: %{public}s", in->err); return; }
+    if (in->err[0]) { pl_log_add([NSString stringWithFormat:@"LOAD ERROR %s", in->err]); ed_toast_text(ed, "Plugin: load error (Plugin Dev > log)", 2); os_log(L, "plugin error: %{public}s", in->err); return; }
     int emode = info_mode(ed);
     if (in->mode >= 0 && in->mode != emode) {
         char b[80]; snprintf(b, sizeof b, "Plugin: for %s mode only", pl_mode_name(in->mode));
@@ -1543,6 +1572,81 @@ static void pl_run(void *ed, NSUInteger idx) {
     if (keep) { if (rc != 0) { pl_input_drop(keep); lh_close(keep); } else { gPlRunSess = keep; pl_sess_add(keep); } }
     pl_session_end(ed, rc, err, NO);    [gOrdNotes removeAllObjects];
     ord_marks_refresh(ed);
+}
+// ---- Plugin Dev(その他メニュー): ログの表示 / コピー / 消去 / Lua を 1 行実行(iOS 標準のウィンドウ)----
+static void pl_dev_menu(void);
+static void pl_alert(NSString *title, NSString *msg, NSString *fieldDef, NSArray<NSString *> *titles, NSArray<NSNumber *> *styles, void (^pick)(NSInteger idx, NSString *text)) {
+    @try {
+        Class cAC = NSClassFromString(@"UIAlertController"), cAA = NSClassFromString(@"UIAlertAction");
+        id app = [(id)NSClassFromString(@"UIApplication") valueForKey:@"sharedApplication"];
+        id vc = [[app valueForKey:@"keyWindow"] valueForKey:@"rootViewController"];
+        if (!cAC || !cAA || !vc) return;
+        while ([vc valueForKey:@"presentedViewController"]) vc = [vc valueForKey:@"presentedViewController"];
+        id ac = ((id (*)(id, SEL, id, id, NSInteger))objc_msgSend)((id)cAC, NSSelectorFromString(@"alertControllerWithTitle:message:preferredStyle:"), title, msg, 1);
+        __block id field = nil;
+        if (fieldDef) {
+            void (^cfg)(id) = ^(id tf) {
+                field = tf;
+                [tf setValue:fieldDef forKey:@"text"];
+                ((void (*)(id, SEL, NSInteger))objc_msgSend)(tf, NSSelectorFromString(@"setClearButtonMode:"), 1);
+                ((void (*)(id, SEL, NSInteger))objc_msgSend)(tf, NSSelectorFromString(@"setAutocorrectionType:"), 1);
+                ((void (*)(id, SEL, NSInteger))objc_msgSend)(tf, NSSelectorFromString(@"setAutocapitalizationType:"), 0);
+            };
+            ((void (*)(id, SEL, id))objc_msgSend)(ac, NSSelectorFromString(@"addTextFieldWithConfigurationHandler:"), cfg);
+        }
+        SEL mk = NSSelectorFromString(@"actionWithTitle:style:handler:");
+        for (NSUInteger i = 0; i < titles.count; i++) {
+            NSInteger idx = (NSInteger)i;
+            void (^h)(id) = ^(id a) {
+                NSString *tx = field ? ([field valueForKey:@"text"] ?: @"") : nil;
+                os_log(L, "plugin dev: pick %ld", (long)idx);
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{ pick(idx, tx); });   // 閉じ終わってから次を出す(閉じている途中の提示は無視される)
+            };
+            id act = ((id (*)(id, SEL, id, NSInteger, id))objc_msgSend)((id)cAA, mk, titles[i], styles[i].integerValue, h);
+            ((void (*)(id, SEL, id))objc_msgSend)(ac, NSSelectorFromString(@"addAction:"), act);
+        }
+        ((void (*)(id, SEL, id, BOOL, id))objc_msgSend)(vc, NSSelectorFromString(@"presentViewController:animated:completion:"), ac, YES, nil);
+    } @catch (NSException *ex) { os_log(L, "plugin dev: alert exception %{public}@", ex.reason); }
+}
+static NSString *gPlDevLast = @"=Editor:GetCurrentBeat().beat";
+static void pl_dev_console(void) {
+    pl_alert(@"Lua console", @"1 行の Lua を実行します(出力は print)。= で始めると値を表示します。", gPlDevLast, @[ @"Run", @"Cancel" ], @[ @0, @1 ], ^(NSInteger idx, NSString *text) {
+        if (idx != 0 || !text.length) { pl_dev_menu(); return; }
+        gPlDevLast = text;
+        void *ed = gPl.editor ?: gEditor;
+        if (!ed) { pl_log_add(@"console: no editor"); pl_dev_menu(); return; }
+        NSString *code = [text hasPrefix:@"="] ? [NSString stringWithFormat:@"print(%@)", [text substringFromIndex:1]] : text;
+        NSString *src = [NSString stringWithFormat:@"PluginName='console'\nfunction Run()\n%@\nend\n", code];
+        NSData *d = [src dataUsingEncoding:NSUTF8StringEncoding];
+        gPlCurPath = @"console";
+        pl_log_add([@"> " stringByAppendingString:text]);
+        if (gPlRunSess) { pl_input_drop(gPlRunSess); pl_sess_close(gPlRunSess); gPlRunSess = NULL; }
+        pl_session_begin(ed);
+        char err[300] = {0};
+        LHSession *keep = NULL;
+        int rc = lh_run(d.bytes, d.length, "console", pl_host(), err, sizeof err, &keep);
+        if (keep) { if (rc != 0) { pl_input_drop(keep); lh_close(keep); } else { gPlRunSess = keep; pl_sess_add(keep); } }
+        pl_session_end(ed, rc, err, YES);
+        dispatch_async(dispatch_get_main_queue(), ^{ pl_dev_menu(); });
+    });
+}
+static void pl_dev_menu(void) {
+    NSMutableString *m = [NSMutableString string];
+    NSUInteger n = gPlLogBuf.count, from = n > 14 ? n - 14 : 0;
+    for (NSUInteger i = from; i < n; i++) [m appendFormat:@"%@\n", gPlLogBuf[i]];
+    if (!n) [m appendString:@"(ログはまだありません)\n"];
+    NSString *msg = m.length > 1800 ? [m substringFromIndex:m.length - 1800] : m;
+    pl_alert(@"Plugin Dev", [msg stringByAppendingString:@"\nDocuments/plugin_log.txt にも書き出します"], nil,
+             @[ @"Lua console...", @"Copy log", @"Clear log", @"Close" ], @[ @0, @0, @2, @1 ], ^(NSInteger idx, NSString *t) {
+        if (idx == 0) pl_dev_console();
+        else if (idx == 1) {
+            @try {
+                id pb = [(id)NSClassFromString(@"UIPasteboard") valueForKey:@"generalPasteboard"];
+                [pb setValue:[gPlLogBuf componentsJoinedByString:@"\n"] forKey:@"string"];
+                ed_toast_text(gPl.editor ?: gEditor, "Plugin log copied", 4);
+            } @catch (NSException *ex) {}
+        } else if (idx == 2) { [gPlLogBuf removeAllObjects]; ed_toast_text(gPl.editor ?: gEditor, "Plugin log cleared", 4); }
+    });
 }
 static void pl_bytes_done(NSData *d) {
     LHSession *s = gPlPickSess; int id = gPlPickId;

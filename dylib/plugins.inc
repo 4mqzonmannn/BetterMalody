@@ -665,7 +665,10 @@ static int h_seg_add(int id, LHBeat rel) {
     if (*ve >= *vc) ((void (*)(void *, void *, float))VA(0x100066080ULL))(n + 136, seg, 0.0f);   // 領域拡張つき追加
     else { memcpy(*ve, seg, 28); *ve += 28; }
     (void)vb;
-    ((void (*)(void *, void *))VA(0x1001EB3E4ULL))(n + 88, seg);   // 終端の更新(読み込み処理と同じ)
+    {   // 終端(+88)は絶対の拍。足した節(始点からの相対)の位置が今の終端より後なら、始点 + 相対 にする
+        Rat endr = rat_add(rat_of(n + 64), r), cur = rat_of(n + 88);
+        if (endr.n * cur.d > cur.n * endr.d) beat_write_rat(n + 88, endr);
+    }
     pl_seg_touch(n);
     return 1;
 }
@@ -1006,7 +1009,8 @@ static void pl_commit_pending(void) {
     BOOL slide = pl_slide();
     void *chart = *(void **)(e + (slide ? 1592 : 1624));
     void *lay = *(void **)(e + 1112), *snd = *(void **)(e + 1080);
-    int added = 0;
+    int added = 0, dups = 0;
+    NSUInteger npend = gPlPending.count;
     for (NSValue *v in gPlPending) {
         uint8_t *n = (uint8_t *)v.pointerValue;
         if (pl_taiko()) {     // 標準の貼り付け(sub_100142EF8)と同じ手順: 譜面へ追加 → スプライト → 音 → 追加の完了処理
@@ -1025,9 +1029,12 @@ static void pl_commit_pending(void) {
         if (!path) {
             double beat = rat_dbl(rat_of(n + 64));
             int lane = slide ? n[128] : n[129];
-            BOOL hit = slide ? ((int (*)(void *, long, double))VA(0x1001C8F60ULL))(chart, lane, beat)
-                             : VT(chart, 40, int (*)(void *, long, double))(chart, lane, beat);
-            if (hit) { VT(n, 8, void (*)(void *))(n); continue; }   // 同じ位置に既にある
+            BOOL hit;
+            if (slide) {   // 標準の当たり判定は「拍が 1e-6 以内で x が既存の幅の中」= 近いだけのノートも「同じ位置」にしてしまう(分母 1048576 の密な wipe が黙って捨てられた)。x と幅まで同じものだけを重複とする
+                uint8_t *ex = ((uint8_t *(*)(void *, long, double))VA(0x1001C8F60ULL))(chart, lane, beat);
+                hit = ex && ex[128] == n[128] && ex[129] == n[129];
+            } else hit = VT(chart, 40, int (*)(void *, long, double))(chart, lane, beat);
+            if (hit) { VT(n, 8, void (*)(void *))(n); dups++; continue; }   // 同じ位置に既にある(標準の当たり判定: 拍が 1e-6 以内で x が既存の幅の中)
         }
         BOOL hold = !slide && (n[112] & 0x80);
         int snum = *(int32_t *)(n + 80);
@@ -1051,7 +1058,7 @@ static void pl_commit_pending(void) {
         gPlEdits++;
     }
     [gPlPending removeAllObjects];
-    if (added) os_log(L, "plugins: inserted %d notes", added);
+    if (npend) os_log(L, "plugins: pending %lu inserted %d duplicate-skipped %d", (unsigned long)npend, added, dups);
 }
 
 // ---- GetUserInput: プラグインパネルの入力欄(ゲーム標準 Textbox)で受け、確定でコールバックを呼ぶ ----
@@ -1542,6 +1549,7 @@ static void pl_run(void *ed, NSUInteger idx) {
     const LHInfo *in = pl_info(idx);
     gPlCurPath = gPlFiles[idx];
     if (in->err[0]) { pl_log_add([NSString stringWithFormat:@"LOAD ERROR %s", in->err]); ed_toast_text(ed, "Plugin: load error (Plugin Dev > log)", 2); os_log(L, "plugin error: %{public}s", in->err); return; }
+    { void **sv0 = sel_vec(ed); os_log(L, "plugin run: %{public}@ selected=%ld effective=%lu", gPlFiles[idx].lastPathComponent, (long)((void **)sv0[1] - (void **)sv0[0]), (unsigned long)sel_effective(ed).count); }
     int emode = info_mode(ed);
     if (in->mode >= 0 && in->mode != emode) {
         char b[80]; snprintf(b, sizeof b, "Plugin: for %s mode only", pl_mode_name(in->mode));

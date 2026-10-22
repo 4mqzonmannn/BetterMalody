@@ -1023,13 +1023,13 @@ static void set_label_text(void *label, const char *txt) {
     ((void (*)(void *, void *))VA(0x100569DF8ULL))(label, buf);         // Text::setString
 }
 // ---- 右ツールバー「BPM」押下 → [BPM / Effect] の選択メニュー(「その他」のゲーム内ポップアップを一時的に差し替え) ----
-#define MAX_ORIG_ITEMS 24
+#define MAX_ORIG_ITEMS 64
 static void *gMenuOrig[MAX_ORIG_ITEMS]; static int gMenuOrigN;
 static BOOL gMenuSwapped;
 static void *gMenuToolbar;
 static void *menu_popup(void *toolbar) { return *(void **)toolbar; }
 static void *menu_list(void *toolbar) { return *(void **)((uint8_t *)toolbar + 8); }
-static void add_menu_item(void *toolbar, const char *iconName, int id, const char *label) {
+static void *add_menu_item(void *toolbar, const char *iconName, int id, const char *label) {
     uint8_t icon[48] = {0};
     ((void (*)(void *, const char *))VA(0x10007309CULL))(icon, iconName);
     ((int64_t (*)(void *, void *, int64_t, int64_t))VA(0x1001FF1ACULL))(toolbar, icon, 0, id);
@@ -1043,6 +1043,7 @@ static void add_menu_item(void *toolbar, const char *iconName, int id, const cha
         void *lab = ((void *(*)(void *, int))VA(0x100544B5CULL))(it, 1);
         if (lab) set_label_text(lab, label);
     }
+    return it;
 }
 static void menu_restore(void) {   // 元の項目へ戻す
     if (!gMenuSwapped || !gMenuToolbar) return;
@@ -1974,17 +1975,52 @@ static void cat_show(void *self, int cat) {
         case BM_TAG_CAT_SPEC:   menu_show_items(self, kCatSpec, (int)(sizeof kCatSpec / sizeof *kCatSpec)); break;
     }
 }
+// 「その他」メニューの BM の項目は、カテゴリ(Select / Copy / Move / Effect / Spectrogram)を押すとその場で中身が開閉する(アコーディオン)。開閉の状態は保存する(既定は Select だけ開く)
+static NSMutableArray<NSValue *> *gBmItems;                 // 自前で足した項目(作り直すときに取り除く)
+static const struct { int tag; const char *icon, *name; const MItem *items; int n; } kAccCats[] = {
+    { BM_TAG_CAT_SELECT, "ui-edit-icon12.png", "Select", kCatSelect, (int)(sizeof kCatSelect / sizeof *kCatSelect) },
+    { BM_TAG_CAT_COPY, "ui-edit-icon8.png", "Copy / Paste", kCatCopy, (int)(sizeof kCatCopy / sizeof *kCatCopy) },
+    { BM_TAG_CAT_MOVE, "ui-edit-icon14.png", "Move", kCatMove, (int)(sizeof kCatMove / sizeof *kCatMove) },
+    { BM_TAG_CAT_EFFECT, "ui-edit-icon1.png", "Effect", kCatEffect, (int)(sizeof kCatEffect / sizeof *kCatEffect) },
+    { BM_TAG_CAT_SPEC, "ui-edit-icon26.png", "Spectrogram", kCatSpec, (int)(sizeof kCatSpec / sizeof *kCatSpec) },
+};
+static NSArray<NSNumber *> *acc_state(void) {
+    NSArray *a = [NSUserDefaults.standardUserDefaults arrayForKey:@"bm.menu.open"];
+    return a ? a : @[ @(BM_TAG_CAT_SELECT) ];
+}
+static BOOL acc_open(int cat) { return [acc_state() containsObject:@(cat)]; }
+static void acc_toggle(int cat) {
+    NSMutableArray *a = [acc_state() mutableCopy];
+    if ([a containsObject:@(cat)]) [a removeObject:@(cat)]; else [a addObject:@(cat)];
+    [NSUserDefaults.standardUserDefaults setObject:a forKey:@"bm.menu.open"];
+}
+static void menu_bm_build(void *self) {
+    void *tb = (uint8_t *)self + 1400;
+    for (NSValue *v in gBmItems) VT(v.pointerValue, 608, void (*)(void *, int))(v.pointerValue, 1);   // removeFromParentAndCleanup(true)
+    gBmItems = [NSMutableArray array];
+    void *it;
+    for (size_t c = 0; c < sizeof kAccCats / sizeof *kAccCats; c++) {
+        BOOL open = acc_open(kAccCats[c].tag);
+        NSString *lb = [NSString stringWithFormat:@"%@ %s", open ? @"-" : @"+", kAccCats[c].name];
+        if ((it = add_menu_item(tb, kAccCats[c].icon, kAccCats[c].tag, lb.UTF8String))) [gBmItems addObject:[NSValue valueWithPointer:it]];
+        if (!open) continue;
+        for (int i = 0; i < kAccCats[c].n; i++) {
+            const MItem *m = &kAccCats[c].items[i];
+            if (m->tag == BM_TAG_CAT_BACK) continue;
+            if (kAccCats[c].tag == BM_TAG_CAT_MOVE && !lay_of(self)->slide && (m->tag == BM_TAG_WIDTH || m->tag == BM_TAG_WIDTH_SD)) continue;   // Key: 幅の項目なし
+            NSString *sl = [@"    " stringByAppendingString:@(m->label)];
+            if ((it = add_menu_item(tb, m->icon, m->tag, sl.UTF8String))) [gBmItems addObject:[NSValue valueWithPointer:it]];
+        }
+    }
+    if ((it = add_menu_item(tb, "ui-edit-icon28.png", BM_TAG_PDEV, "Plugin Dev..."))) [gBmItems addObject:[NSValue valueWithPointer:it]];
+    if ((it = add_menu_item(tb, "ui-edit-icon28.png", BM_TAG_OPTS, "Editor options..."))) [gBmItems addObject:[NSValue valueWithPointer:it]];
+    ((void (*)(void *, int))VA(0x100048FF8ULL))(menu_list(tb), 0);   // 0 = スクロール位置を先頭へ(1 だと伸びた分だけ下端基準で見える)
+}
 static void sel_add_menu_items(void *self) {   // 「その他」メニューにカテゴリ項目を追加(エディタごとに1回)
     if (gSelMenuFor == self || !lay_of(self)) return;
     gSelMenuFor = self;
-    void *tb = (uint8_t *)self + 1400;
-    add_menu_item(tb, "ui-edit-icon12.png", BM_TAG_CAT_SELECT, "Select >");
-    add_menu_item(tb, "ui-edit-icon8.png", BM_TAG_CAT_COPY, "Copy / Paste >");
-    add_menu_item(tb, "ui-edit-icon14.png", BM_TAG_CAT_MOVE, "Move >");
-    add_menu_item(tb, "ui-edit-icon1.png", BM_TAG_CAT_EFFECT, "Effect >");
-    add_menu_item(tb, "ui-edit-icon26.png", BM_TAG_CAT_SPEC, "Spectrogram >");
-    add_menu_item(tb, "ui-edit-icon28.png", BM_TAG_PDEV, "Plugin Dev...");
-    add_menu_item(tb, "ui-edit-icon28.png", BM_TAG_OPTS, "Editor options...");
+    gBmItems = nil;                                       // 前のエディタの項目は破棄済み
+    menu_bm_build(self);
 }
 
 // ---- 汎用スライダーダイアログ(ゲーム標準の編集中断ダイアログ script_editpause.mui と同じ見た目: 中央のパネルにゲージ最大 2 本)----
@@ -2287,7 +2323,13 @@ static intptr_t hook_touch(void *self, int ev, void *node, void *pos) {
             if (ev == 3) {
                 gEditor = self;
                 int cat = tag;
-                dispatch_async(dispatch_get_main_queue(), ^{ cat_show(self, cat); });   // 項目のクリック処理が戻ってから差し替える
+                dispatch_async(dispatch_get_main_queue(), ^{   // 項目のクリック処理が戻ってから、その場で開閉(アコーディオン)して、メニューを出し直す
+                    if (gMenuSwapped) { cat_show(self, cat); return; }
+                    acc_toggle(cat);
+                    menu_bm_build(self);
+                    void *tb = (uint8_t *)self + 1400;
+                    VT(menu_popup(tb), 336, void (*)(void *, int))(menu_popup(tb), 1);
+                });
             }
             return 0;
         }
@@ -3212,8 +3254,10 @@ static void ord_unsel(void *ed, void *sp) {         // 標準の選択解除(sub
 }
 // 標準の当たり判定は経路上の中継点(小さい丸)だけなので、選択から外した(見た目が通常に戻った)Order のスライドは狙いにくく、外すと「何も無い所のタップ」= リセットになってしまう。
 // 何も選ばれなかったタップは、スライドの経路(丸の列)の近くかを調べ、最寄りのスライドを押したものとして扱う
-static float gOrdMinD; static int gOrdNSlides;
-static void *ord_hit_slide(void *ed, const void *pos) {
+static float gOrdMinD; static int gOrdNSlides; static double gOrdTb, gOrdU, gOrdC, gOrdW, gOrdHx, gOrdSx;
+static void *ord_hit_slide_tol(void *ed, const void *pos, double tolB, double tolX);
+static void *ord_hit_slide(void *ed, const void *pos) { return ord_hit_slide_tol(ed, pos, 0.06, 6.0); }
+static void *ord_hit_slide_tol(void *ed, const void *pos, double tolB, double tolX) {
     typedef struct { float v[2]; uint64_t pad[2]; } V2Ret;
     uint8_t *e = (uint8_t *)ed;
     gOrdMinD = 1e9f; gOrdNSlides = 0;
@@ -3223,6 +3267,7 @@ static void *ord_hit_slide(void *ed, const void *pos) {
     double xw = LF(ed, 1696), K = (double)LF(ed, 1716) * (double)LF(ed, 1720);
     if (xw <= 0 || K <= 0) return NULL;
     double tb = r.v[1] / K, u = r.v[0] * 255.0 / xw;                                // 拍 / 横位置(0〜255)
+    gOrdTb = tb; gOrdU = u;
     nvec *ch = node_children(cont);
     if (!ch) return NULL;
     void *best = NULL; double bs = 1e9;
@@ -3235,7 +3280,7 @@ static void *ord_hit_slide(void *ed, const void *pos) {
         if (cnt < 0 || cnt > 4096) continue;
         double lastB = cnt ? head + note_beat(sb + 28 * (cnt - 1), 0, 8, 12) : head;
         double maxB = fmax(end, lastB);
-        if (tb < head - 0.06 || tb > maxB + 0.06) continue;                        // 時間の範囲外
+        if (tb < head - tolB || tb > maxB + tolB) continue;                        // 時間の範囲外
         gOrdNSlides++;
         double pb = head, px = 0, off = 0; BOOL found = NO;                        // 中継点の間は中心のずれを線形に補間
         for (long i = 0; i < cnt; i++) {
@@ -3246,8 +3291,8 @@ static void *ord_hit_slide(void *ed, const void *pos) {
         if (!found) off = px;
         double center = n[128] + off, w = n[129];                                  // +128 は中心 x(標準の配置は、幅の半分で端に収めた中心を入れる)/ +129 は幅
         double d = fabs(u - center) - w / 2; if (d < 0) d = 0;
-        if (d < gOrdMinD) gOrdMinD = (float)d;
-        if (d > 6.0) continue;                                                     // 幅の外(余裕 6/255)
+        if (d < gOrdMinD) { gOrdMinD = (float)d; gOrdC = center; gOrdW = w; gOrdHx = n[128]; gOrdSx = cnt ? (double)seg_x16(sb + 28 * (cnt - 1)) : 0; }
+        if (d > tolX) continue;                                                    // 幅の外(余裕 tolX / 255)
         double score = fabs(u - center);
         if (score < bs) { bs = score; best = n; }
     }
@@ -3319,6 +3364,7 @@ static intptr_t hook_keytouch(void *a1, int ev, void *a3, void *pos) {   // sub_
     ord_track(a1, ev, pos);
     return r;
 }
+static intptr_t hook_s_note(void *a1, int ev, void *a3, void *pos);
 static intptr_t hook_s_touch(void *a1, int ev, void *a3, void *pos) {   // sub_1000C6744 (EditorSlide)
     if (gPreview && a1 == gEditor) return 1;
     if (lay_of(a1)) un_mark();
@@ -3332,6 +3378,27 @@ static intptr_t hook_s_touch(void *a1, int ev, void *a3, void *pos) {   // sub_1
         void **sv = sel_vec(a1);
         selBefore = (int)(((void **)sv[1] - (void **)sv[0]));
         if (selBefore == 1) selNote = VT(*(void **)sv[0], 704, uint8_t *(*)(void *))(*(void **)sv[0]);
+    }
+    {   // Note / Wipe を置くツール(1 / 2)や、ツール未選択(-1)で、スライドの本体(幅の中・始点〜終点)を押したら、ノートを置かずに、そのスライドを標準の「ノートへのタッチ」として扱う(選択 + ドラッグで移動)。
+        // 標準の当たり判定は経路の丸のそばだけ(置けない位置の判定は本体全体)なので、丸の間を押すと選べず、置こうとして拒否されるだけだった。ドラッグの続き(1 / 2 / 3)もこのスライドへ渡す
+        static void *bodySp;
+        int tool = *(int *)((uint8_t *)a1 + 1368);
+        if (bodySp && ev != 0) {
+            void *sp = bodySp;
+            if (ev == 2 || ev == 3) bodySp = NULL;
+            return hook_s_note(a1, ev, sp, pos);
+        }
+        if (ev == 0 && pos && (tool == 1 || tool == 2 || tool < 0) && !*((uint8_t *)a1 + 903) && !*((uint8_t *)a1 + 901) && !gLasso) {
+            void *hn = ord_hit_slide_tol(a1, pos, 0.0005, 0.0);
+            if (!hn && gOrdNSlides) os_log(L, "slide-body: miss tb=%.4f u=%.1f slidesInTime=%d minDx=%.1f center=%.1f w=%.0f headX=%.0f lastSegOff=%.0f", gOrdTb, gOrdU, gOrdNSlides, gOrdMinD, gOrdC, gOrdW, gOrdHx, gOrdSx);
+            void *sp = hn ? sprite_for_note(a1, hn) : NULL;
+            if (sp) {
+                sel_snapshot_take(a1);
+                bodySp = sp;
+                os_log(L, "slide-body: touch slide head=%.4f end=%.4f", note_beat(hn, 64, 72, 76), note_beat(hn, 88, 96, 100));
+                return hook_s_note(a1, 0, sp, pos);
+            }
+        }
     }
     intptr_t r = orig_s_touch(a1, ev, a3, pos);
     if (ev == 0 && selBefore) {

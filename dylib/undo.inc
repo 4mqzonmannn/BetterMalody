@@ -508,6 +508,17 @@ static void un_node_insert(void *ed, UnNode *nd, const uint8_t *src) {
 }
 static void un_apply(void *ed, UnEntry *en, BOOL undo) {
     gUnBusy = YES;
+    NSMutableDictionary<NSData *, NSNumber *> *selKeep = [NSMutableDictionary dictionary];   // 取り消し / やり直しで残るノートの選択を保つ(選択は履歴に入らないので、中身のキーで控えて付け直す)
+    if (!is_taiko(ed)) {
+        void **sv = sel_vec(ed);
+        int mode = un_mode_of(ed);
+        for (void **q = (void **)sv[0]; q != (void **)sv[1]; q++) {
+            void *note = VT(*q, 704, void *(*)(void *))(*q);
+            if (!note) continue;
+            NSData *k = un_note_key(note, mode);
+            selKeep[k] = @(selKeep[k].intValue + 1);
+        }
+    }
     if (is_taiko(ed)) t_sel_clear(ed);
     else { sel_snapshot_drop(); sel_clear(ed); }
     NSArray<UnOp *> *ops = undo ? [[en->ops reverseObjectEnumerator] allObjects] : en->ops;
@@ -537,6 +548,20 @@ static void un_apply(void *ed, UnEntry *en, BOOL undo) {
     if ((en->metaOld || en->bpmOld) && !is_taiko(ed)) un_info_boxes_refresh(ed);
     *((uint8_t *)ed + 883) = 1;
     if (gPreview && ed == gEditor) ed_relayout(ed);
+    if (selKeep.count) {                                                    // 残っているノートの選択を戻す
+        int mode = un_mode_of(ed), n = 0;
+        for (NSValue *spv in sel_children(ed)) {
+            void *sp = spv.pointerValue;
+            void *note = VT(sp, 704, void *(*)(void *))(sp);
+            if (!note) continue;
+            NSData *k = un_note_key(note, mode);
+            int left = selKeep[k].intValue;
+            if (left <= 0) continue;
+            selKeep[k] = @(left - 1);
+            sel_add(ed, sp); n++;
+        }
+        os_log(L, "undo: selection kept %d", n);
+    }
     gUnBusy = NO;
     BOOL ok; gUnBaseCount = un_live(ed, &ok).count;
 }

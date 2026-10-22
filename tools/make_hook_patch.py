@@ -56,6 +56,8 @@ HOOKS = [
     ("s2wipe",   0x1000C5E10, 0x1000053E8),  # Slide → Wipe(sub_1000C5E10): オプションで、始点と seg の位置のまま Wipe にする(標準は分割グリッドへ再配置)
     ("segadd",   0x1000C6CA8, 0x100005400),  # Slide の seg 追加(sub_1000C6CA8): オプションで、終点より前の beat にも seg を置ける
     ("chit",     0x1001C8F60, 0x100005418),  # Slide の「その位置にノートがあるか」(sub_1000C8F60): 編集中のスライド自身の本体は「ノートあり」と扱わない(時系列でない seg を本体の上にも置けるように)
+    ("store",    0x1001D7A24, 0x100005430),  # ストア API の要求組み立て(sub_1001D7A24): osu! ストア選択時は接続先 / key / uid を中継サーバー用に差し替えて呼ぶ
+    ("storetouch",0x1000ACEA4, 0x100005448), # ストア画面のタッチ(sub_1000ACEA4, etag 112): 見出しの切替ボタン(tag 9)で Malody / osu! ストアを切り替える
 ]
 def u32(x): return struct.pack("<I", x & 0xFFFFFFFF)
 def adrp(rd, target, pc):

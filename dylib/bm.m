@@ -3924,6 +3924,8 @@ __attribute__((constructor)) static void bm_init(void) {
     orig_tgrid = (tgrid_fn)VA(0x100005380ULL); slots[39] = (void *)hook_tgrid;              // tgrid(cave 0x100005370 + 16): Taiko のグリッド再構築
     orig_tgridpos = (tgridpos_fn)VA(0x100005398ULL); slots[40] = (void *)hook_tgridpos;     // tgridpos(cave 0x100005388 + 16): Taiko のグリッド位置
     orig_pathhit = (pathhit_fn)VA(0x1000053C8ULL); slots[42] = (void *)hook_pathhit;          // pathhit(cave 0x1000053B8 + 16): 重複 beat のスライドの当たり判定の誤判定を外す
+    orig_store = (store_fn)VA(0x100005440ULL); slots[47] = (void *)hook_store;                      // store(cave 0x100005430 + 16): osu! ストア選択時は中継サーバーへ
+    orig_storetouch = (storetouch_fn)VA(0x100005458ULL); slots[48] = (void *)hook_storetouch;       // storetouch(cave 0x100005448 + 16): ストア画面の切替ボタン
     slots[43] = (void *)hook_notecmp;                                                              // notecmp(cave 0x1000053D0): 分数の比較を 64bit に
     orig_chit = (chit_fn)VA(0x100005428ULL); slots[46] = (void *)hook_chit;                           // chit(cave 0x100005418 + 16)
     orig_s2wipe = (s2w_fn)VA(0x1000053F8ULL); slots[44] = (void *)hook_s2wipe;                     // s2wipe(cave 0x1000053E8 + 16)

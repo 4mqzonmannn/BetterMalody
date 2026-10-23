@@ -6,6 +6,7 @@ SDK=/Library/Developer/CommandLineTools/SDKs/MacOSX26.0.sdk
 LS=third_party/lua/lua-5.4.7/src
 LUASRC=""
 for f in lapi lcode lctype ldebug ldo ldump lfunc lgc llex lmem lobject lopcodes lparser lstate lstring ltable ltm lundump lvm lzio lauxlib lbaselib lcorolib lmathlib lstrlib ltablib lutf8lib; do LUASRC="$LUASRC $LS/$f.c"; done
+python3 -I ../tools/gen_builtin.py
 clang -target arm64-apple-ios14.0-macabi -isysroot $SDK \
   -iframework $SDK/System/iOSSupport/System/Library/Frameworks -isystem $SDK/System/iOSSupport/usr/include \
   -dynamiclib -fobjc-arc -O2 ${BM_CFLAGS:-} -framework Foundation -framework Accelerate -framework ImageIO -framework CoreGraphics \

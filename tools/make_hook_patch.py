@@ -3,7 +3,7 @@
    adrp x16,SLOTPAGE / ldr x16,[x16,#off] / cbz x16,ORIG / br x16 / ORIG: <元の先頭命令> / b ENTRY+4
  スロット(__DATA末尾の未使用領域)にdylibが関数ポインタを書く。slot==0 なら元の処理へ(dylib無しでも安全)。
  使い方: make_hook_patch.py <現在のバイナリ> -> apply_container.sh 用 spec"""
-import struct, sys
+import os, struct, sys
 BASE = 0x100000000
 SLOT0 = 0x1016CF800
 # (名前, 入口VA, ケイブVA)  ※ORIG(退避)= ケイブ+16 を dylib 側 bm.m と一致させる
@@ -58,7 +58,9 @@ HOOKS = [
     ("chit",     0x1001C8F60, 0x100005418),  # Slide の「その位置にノートがあるか」(sub_1000C8F60): 編集中のスライド自身の本体は「ノートあり」と扱わない(時系列でない seg を本体の上にも置けるように)
     ("store",    0x1001D7A24, 0x100005430),  # ストア API の要求組み立て(sub_1001D7A24): osu! ストア選択時は接続先 / key / uid を中継サーバー用に差し替えて呼ぶ
     ("storetouch",0x1000ACEA4, 0x100005448), # ストア画面のタッチ(sub_1000ACEA4, etag 112): 見出しの切替ボタン(tag 9)で Malody / osu! ストアを切り替える
+    ("tcprecv",  0x100184C4C, 0x100005460),  # マルチ TCP の受信 1 フレーム(sub_100184C4C → sub_1001868EC): 実験用に生フレームを記録(公開版はスロット未設定=素通し)
 ]
+if os.environ.get("BM_PUBLIC"): HOOKS = [h for h in HOOKS if h[0] != "tcprecv"]   # 実験用フック(最後尾=スロット番号がずれない)は公開版に入れない
 def u32(x): return struct.pack("<I", x & 0xFFFFFFFF)
 def adrp(rd, target, pc):
     imm = (((target & ~0xFFF) - (pc & ~0xFFF)) >> 12) & ((1 << 21) - 1)

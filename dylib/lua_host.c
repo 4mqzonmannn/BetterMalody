@@ -219,6 +219,7 @@ static int e_SetNoteX(lua_State *L) { H->set_x((int)luaL_checkinteger(L, ARG(1))
 static int e_SetNoteFlag(lua_State *L) { if (H->set_flag) H->set_flag((int)luaL_checkinteger(L, ARG(1)), (int)luaL_checkinteger(L, ARG(2))); return 0; }
 static int e_SetNoteWidth(lua_State *L) { H->set_width((int)luaL_checkinteger(L, ARG(1)), (int)luaL_checkinteger(L, ARG(2))); return 0; }
 static int e_SelectNote(lua_State *L) { if (H->select) H->select((int)luaL_checkinteger(L, ARG(1))); return 0; }
+static int e_ClearSelection(lua_State *L) { (void)L; if (H->sel_clear) H->sel_clear(); return 0; }   // BM 拡張
 static int e_AddNoteSlideBody(lua_State *L) {
     if (H->seg_add) H->seg_add((int)luaL_checkinteger(L, ARG(1)), check_beat(L, ARG(2)));
     return 0;
@@ -595,7 +596,7 @@ static const luaL_Reg kEditor[] = {
     { "GetEffectCount", e_GetEffectCount }, { "GetEffectAt", e_GetEffectAt },
     { "StartBatch", e_StartBatch }, { "FinishBatch", e_FinishBatch }, { "DeleteNote", e_DeleteNote },
     { "AddNote", e_AddNote }, { "CreateNote", e_AddNote }, { "SetNoteBeat", e_SetNoteBeat }, { "SetNoteX", e_SetNoteX },
-    { "SetNoteWidth", e_SetNoteWidth }, { "SelectNote", e_SelectNote },
+    { "SetNoteWidth", e_SetNoteWidth }, { "SelectNote", e_SelectNote }, { "ClearSelection", e_ClearSelection },
     { "ShowMessage", e_ShowMessage }, { "ShowTip", e_ShowTip }, { "MakeBeat", e_MakeBeat },
     { "BeatAdd", e_BeatAdd }, { "BeatMinus", e_BeatMinus }, { "Beat", e_Beat }, { "SeekTo", e_SeekTo },
     { "GetUserInput", e_GetUserInput }, { "GetUserSelect", e_GetUserSelect }, { "GetUserSlider", e_GetUserSlider }, { "GetUserSlider2", e_GetUserSlider2 }, { "GetUserOption", e_GetUserOption },

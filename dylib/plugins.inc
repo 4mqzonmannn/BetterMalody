@@ -63,9 +63,21 @@ static void pl_install_samples(NSString *dir) {
     };
     for (NSString *k in s) [s[k] writeToFile:[dir stringByAppendingPathComponent:k] atomically:YES encoding:NSUTF8StringEncoding error:nil];
 }
+#include "builtin_gen.inc"
+static void pl_install_builtin(NSString *dir) {   // 組み込みプラグイン(BetterMalody/*.lua)。毎回、内容が違えば書き直す(更新を反映)
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *bd = [dir stringByAppendingPathComponent:@"BetterMalody"];
+    [fm createDirectoryAtPath:bd withIntermediateDirectories:YES attributes:nil error:nil];
+    for (size_t i = 0; i < sizeof kBuiltinPlugins / sizeof *kBuiltinPlugins; i++) {
+        NSString *p = [bd stringByAppendingPathComponent:@(kBuiltinPlugins[i].name)], *src = @(kBuiltinPlugins[i].src);
+        NSString *cur = [NSString stringWithContentsOfFile:p encoding:NSUTF8StringEncoding error:nil];
+        if (![cur isEqualToString:src]) [src writeToFile:p atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    }
+}
 static void pl_scan(void) {
     NSString *dir = pl_dir();
     pl_install_samples(dir);
+    pl_install_builtin(dir);
     gPlFiles = [NSMutableArray array]; gPlInfos = [NSMutableArray array];
     NSFileManager *fm = NSFileManager.defaultManager;
     NSMutableArray *paths = [NSMutableArray array];
@@ -540,6 +552,12 @@ static int h_select(int id) {
     sel_add(gPlEd, sp);
     return 1;
 }
+static void h_sel_clear(void) {   // BM 拡張 Editor:ClearSelection()
+    if (!gPlEd) return;
+    if (pl_taiko()) { t_sel_clear(gPlEd); return; }
+    sel_snapshot_drop();
+    sel_clear(gPlEd);
+}
 static int h_seg_count(int id) {
     uint8_t *n = pl_note(id);
     if (!n || !pl_slide()) return 0;
@@ -618,6 +636,7 @@ static const char *h_chart_info(const char *key) {
         uint8_t *song = *(uint8_t **)(chart + 408);
         if (song) s = *(uint8_t **)(song + ([k isEqualToString:@"title"] ? 160 : 168));
     } else if ([k isEqualToString:@"key"]) { snprintf(gPlInfoBuf, sizeof gPlInfoBuf, "%d", *(int *)(chart + 372)); return gPlInfoBuf; }
+    else if ([k isEqualToString:@"mode"]) { snprintf(gPlInfoBuf, sizeof gPlInfoBuf, "%d", info_mode(gPlEd)); return gPlInfoBuf; }   // BM 拡張: 0 Key / 5 Taiko / 7 Slide
     else if ([k isEqualToString:@"bpm"]) {
         deq *q = BPMQ();
         if (deq_sane(q, 48) && q->size) {
@@ -1318,7 +1337,7 @@ static const LHHost *pl_host(void) {
     h.order = h_order; h.order_clear = h_order_clear;
     h.sel = h_sel; h.count = h_count; h.at = h_at; h.type = h_type; h.x = h_x; h.width = h_width; h.flag = h_flag;
     h.beat = h_beat; h.time_ms = h_time; h.set_beat = h_set_beat; h.set_x = h_set_x; h.set_width = h_set_width;
-    h.del = h_del; h.add = h_add; h.select = h_select; h.seg_count = h_seg_count; h.seg_beat = h_seg_beat; h.seg_x = h_seg_x;
+    h.del = h_del; h.add = h_add; h.select = h_select; h.sel_clear = h_sel_clear; h.seg_count = h_seg_count; h.seg_beat = h_seg_beat; h.seg_x = h_seg_x;
     h.cur_beat = h_cur_beat; h.cur_time = h_cur_time; h.cur_div = h_cur_div; h.toast = h_toast; h.chart_info = h_chart_info;
     h.seg_add = h_seg_add; h.seg_set_x = h_seg_set_x; h.seg_clear = h_seg_clear; h.data_get = h_data_get; h.data_set = h_data_set;
     h.file_read = h_file_read; h.file_write = h_file_write;
@@ -1549,7 +1568,8 @@ static void pl_run(void *ed, NSUInteger idx) {
     const LHInfo *in = pl_info(idx);
     gPlCurPath = gPlFiles[idx];
     if (in->err[0]) { pl_log_add([NSString stringWithFormat:@"LOAD ERROR %s", in->err]); ed_toast_text(ed, "Plugin: load error (Plugin Dev > log)", 2); os_log(L, "plugin error: %{public}s", in->err); return; }
-    { void **sv0 = sel_vec(ed); os_log(L, "plugin run: %{public}@ selected=%ld effective=%lu", gPlFiles[idx].lastPathComponent, (long)((void **)sv0[1] - (void **)sv0[0]), (unsigned long)sel_effective(ed).count); }
+    if (!is_taiko(ed)) { void **sv0 = sel_vec(ed); os_log(L, "plugin run: %{public}@ selected=%ld effective=%lu", gPlFiles[idx].lastPathComponent, (long)((void **)sv0[1] - (void **)sv0[0]), (unsigned long)sel_effective(ed).count); }
+    else os_log(L, "plugin run: %{public}@ (taiko)", gPlFiles[idx].lastPathComponent);
     int emode = info_mode(ed);
     if (in->mode >= 0 && in->mode != emode) {
         char b[80]; snprintf(b, sizeof b, "Plugin: for %s mode only", pl_mode_name(in->mode));
@@ -1602,6 +1622,14 @@ static void pl_run(void *ed, NSUInteger idx) {
     pl_session_end(ed, rc, err, NO);    [gOrdNotes removeAllObjects];
     ord_marks_refresh(ed);
 }
+// 組み込みプラグイン(export_plugins/BetterMalody/<name>)をメニューなどから実行する
+static void bm_run_builtin(void *ed, NSString *name) {
+    if (!gPlFiles) pl_scan();
+    NSString *suffix = [@"/BetterMalody/" stringByAppendingString:name];
+    for (NSUInteger i = 0; i < gPlFiles.count; i++) if ([gPlFiles[i] hasSuffix:suffix]) { pl_run(ed, i); return; }
+    ed_toast_text(ed, "Built-in plugin not found", 2);
+}
+
 // ---- Plugin Dev(その他メニュー): ログの表示 / コピー / 消去 / Lua を 1 行実行(iOS 標準のウィンドウ)----
 static void pl_dev_menu(void);
 // アラートの提示: 直前のアラートが閉じ終わっていない間(Mac は閉じるアニメーションが長い)の提示は黙って無視されるので、閉じ終わるまで待ってから出す(最大 5 秒)。

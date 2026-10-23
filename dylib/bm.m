@@ -46,6 +46,12 @@
 #define BM_TAG_MORE_FX    701   // 選択メニューの項目 = effect リスト
 #define BM_TAG_MORE_BPM   702   // 選択メニューの項目 = BPM リスト(元の動作)
 #define BM_TAG_PLUGINS    766   // 選択メニューの項目 = Lua プラグイン管理
+#define BM_TAG_EASE       776   // Effect > Ease effects...(組み込みプラグイン bm_ease.lua)
+#define BM_TAG_SELF       777   // Select > Select filter(Slide: ON/OFF。ON の間は種類を切り替える項目が出る)
+#define BM_TAG_SF_NOTE    780   // Select > Select filter(Slide)の種類切替
+#define BM_TAG_SF_WIPE    781
+#define BM_TAG_SF_SLIDE   782
+#define BM_TAG_SVG        783   // Effect > SV graph ON/OFF
 #define BM_TAG_PDEV       774   // その他 > Plugin Dev(ログ / Lua コンソール)
 #define BM_TAG_OPTS       775   // その他 > Editor options(オプトインの設定)
 #define BM_TAG_CHOICE_BACK 773  // 選択メニュー(BPM / Effect / Plugins / Folder)の Back = メニューを閉じる
@@ -1093,7 +1099,11 @@ static void menu_show_choice(void *self) {   // BPM / Effect の選択メニュ�
 #define BM_TAG_SEL_ALL  710
 #define BM_TAG_SEL_INV  711
 #define BM_TAG_SEL_CLR  712
-static void **sel_vec(void *ed) { return (void **)((uint8_t *)ed + (lay_of(ed)->slide ? 1560 : 1592)); }   // [begin,end,cap]
+static void **sel_vec(void *ed) {   // [begin,end,cap]
+    const Lay *l = lay_of(ed);
+    if (!l) { static void *none[3]; return none; }   // Key / Slide 以外(Taiko など)は選択ベクタを持たない → 空の選択(NULL 参照で落とさない)
+    return (void **)((uint8_t *)ed + (l->slide ? 1560 : 1592));
+}
 static void sel_clear(void *ed) {
     if (lay_of(ed)->slide) ((void (*)(void *))VA(0x1000C5954ULL))(ed);
     else ((void (*)(void *))VA(0x1001B1BDCULL))(ed);
@@ -1139,9 +1149,35 @@ static void sel_snapshot_take(void *ed) {
     gSelSnapEd = ed; gSelSnapT = CFAbsoluteTimeGetCurrent();
 }
 static void sel_snapshot_drop(void) { gSelSnap = nil; gSelSnapEd = NULL; }
+static BOOL gSvgOn, gSvgToast; static uint64_t gSvgHash;
+static void svg_update(void *ed);   // SV グラフ(レーンに薄く重ねる scroll / hs の折れ線)
+// ---- 選択フィルタ(Slide のみ): ON の間、全選択 / 反転 / 投げ縄は、許可した種類(Note / Wipe / Slide)のノートだけを選ぶ ----
+//  種類 = ノートのフラグ: +113 の bit8 = Slide(経路)、bit4 = Wipe、どちらも無ければ Note。種類を外したときは、その種類を今の選択からも外す。
+static struct { BOOL on, loaded; int mask; } gSf;
+static void sf_load(void) {
+    if (gSf.loaded) return;
+    gSf.loaded = YES;
+    NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
+    gSf.on = [d boolForKey:@"bm.sf.on"];
+    id m = [d objectForKey:@"bm.sf.mask"];
+    gSf.mask = m ? [m intValue] & 7 : 7;
+}
+static void sf_save(void) {
+    NSUserDefaults *d = NSUserDefaults.standardUserDefaults;
+    [d setBool:gSf.on forKey:@"bm.sf.on"]; [d setInteger:gSf.mask forKey:@"bm.sf.mask"];
+}
+static int sf_kind(const uint8_t *note) { return (note[113] & 8) ? 2 : ((note[113] & 4) ? 1 : 0); }
+static BOOL sf_active(void *ed) { sf_load(); return gSf.on && lay_of(ed) && lay_of(ed)->slide; }
+static void sel_add_f(void *ed, void *sp) {   // フィルタを通すときだけ選ぶ(OFF / Slide 以外は sel_add と同じ)
+    if (sf_active(ed)) {
+        void *note = VT(sp, 704, void *(*)(void *))(sp);
+        if (!note || !((gSf.mask >> sf_kind(note)) & 1)) return;
+    }
+    sel_add(ed, sp);
+}
 static void sel_select_all(void *ed) {
     sel_snapshot_drop();
-    for (NSValue *v in sel_children(ed)) sel_add(ed, v.pointerValue);
+    for (NSValue *v in sel_children(ed)) sel_add_f(ed, v.pointerValue);
 }
 static void sel_invert(void *ed) {
     NSMutableSet *was = [NSMutableSet set];
@@ -1153,7 +1189,7 @@ static void sel_invert(void *ed) {
     }
     sel_snapshot_drop();
     sel_clear(ed);
-    for (NSValue *x in kids) if (![was containsObject:x]) sel_add(ed, x.pointerValue);
+    for (NSValue *x in kids) if (![was containsObject:x]) sel_add_f(ed, x.pointerValue);
 }
 static void sel_toast_count(void *ed) {
     void **v = sel_vec(ed);
@@ -1217,6 +1253,20 @@ static NSArray *sel_effective(void *ed) {   // 現在の選択。メニュー操
         for (NSValue *x in sel_children(ed)) if ([gSelSnap containsObject:x]) [out addObject:x];
     }
     return out;
+}
+static int sf_narrow(void *ed) {   // 今の選択をフィルタで絞り込む(戻り値 = 残った数)
+    NSArray *sel = sel_effective(ed);
+    sel_snapshot_drop();
+    sel_clear(ed);
+    for (NSValue *v in sel) sel_add_f(ed, v.pointerValue);
+    void **vv = sel_vec(ed);
+    return (int)(((uint8_t *)vv[1] - (uint8_t *)vv[0]) / 8);
+}
+static NSString *sf_summary(void) {
+    static const char *const nm[3] = { "Note", "Wipe", "Slide" };
+    NSMutableArray *a = [NSMutableArray array];
+    for (int k = 0; k < 3; k++) if ((gSf.mask >> k) & 1) [a addObject:@(nm[k])];
+    return a.count ? [a componentsJoinedByString:@", "] : @"nothing";
 }
 static void clip_copy(void *ed) {
     NSArray *sel = sel_effective(ed);
@@ -1679,7 +1729,7 @@ static void lasso_select(void *ed) {
         }
         if (in) [hit addObject:sv];
     }
-    for (NSValue *sv in hit) sel_add(ed, sv.pointerValue);   // 既に選択中のノートは解除せず、囲んだものを加える
+    for (NSValue *sv in hit) sel_add_f(ed, sv.pointerValue);   // 既に選択中のノートは解除せず、囲んだものを加える
     void **sv2 = sel_vec(ed);
     char buf[48]; snprintf(buf, sizeof buf, "Lasso: +%lu (selected %ld)", (unsigned long)[hit count], (long)((void **)sv2[1] - (void **)sv2[0]));
     ed_toast_text(ed, buf, 4);
@@ -1902,6 +1952,10 @@ static void info_pick(void *ed, int k) {
 #include "plugins.inc"
 #include "undo.inc"
 #include "osu.inc"
+#if !defined(BM_PUBLIC) && __has_include("mpshare.inc")   // 非公開の実験コード(公開リポジトリには含めない)
+#define BM_MPSHARE 1
+#include "mpshare.inc"
+#endif
 #include "opts.inc"
 #include "kbd.inc"
 #include "settings.inc"
@@ -1929,6 +1983,7 @@ static void *gSelMenuFor;
 #define BM_TAG_CAT_EFFECT 763
 #define BM_TAG_CAT_SPEC   764
 #define BM_TAG_CAT_BACK   765
+#define BM_TAG_CAT_THS    778   // Taiko の HS カテゴリ
 #define BM_TAG_ORDER      768   // 「順番に選択」の ON/OFF
 #define BM_TAG_WIDTH_SD   755   // 幅をゲージで指定して適用(Slide)
 #define BM_TAG_QUANT_SD   756   // クオンタイズの分割数をゲージで指定
@@ -1936,7 +1991,7 @@ static void *gSelMenuFor;
 static const MItem kCatSelect[] = {
     { BM_TAG_SEL_ALL, "ui-edit-icon12.png", "Select all" }, { BM_TAG_SEL_INV, "ui-edit-icon13.png", "Invert selection" },
     { BM_TAG_SEL_CLR, "ui-edit-icon21.png", "Deselect" }, { BM_TAG_LASSO, "ui-edit-icon12.png", "Lasso mode" },
-    { BM_TAG_ORDER, "ui-edit-icon13.png", "Order select" },
+    { BM_TAG_ORDER, "ui-edit-icon13.png", "Order select" }, { BM_TAG_SELF, "ui-edit-icon12.png", "Select filter" },
     { BM_TAG_CAT_BACK, "ui-edit-icon15.png", "< Back" } };
 static const MItem kCatCopy[] = {
     { BM_TAG_COPY, "ui-edit-icon8.png", "Copy selection" }, { BM_TAG_PASTE_MIR, "ui-edit-icon26.png", "Paste mirrored" },
@@ -1950,6 +2005,7 @@ static const MItem kCatMove[] = {
 static const MItem kCatEffect[] = {
     { BM_TAG_FX_COPY, "ui-edit-icon8.png", "Copy effects in range" }, { BM_TAG_FX_PASTE, "ui-edit-icon9.png", "Paste effects here" },
     { BM_TAG_FX_DEL, "ui-edit-icon25.png", "Delete effects in range" }, { BM_TAG_MARKERS, "ui-edit-icon1.png", "Effect markers" },
+    { BM_TAG_EASE, "ui-edit-icon1.png", "Ease effects..." }, { BM_TAG_SVG, "ui-edit-icon1.png", "SV graph" },
     { BM_TAG_CAT_BACK, "ui-edit-icon15.png", "< Back" } };
 static const MItem kCatSpec[] = {
     { BM_TAG_SPEC_TOGGLE, "ui-edit-icon1.png", "Spectrogram ON/OFF" }, { BM_TAG_SPEC_MORE, "ui-edit-icon12.png", "Opacity..." },
@@ -1977,12 +2033,29 @@ static void cat_show(void *self, int cat) {
 }
 // 「その他」メニューの BM の項目は、カテゴリ(Select / Copy / Move / Effect / Spectrogram)を押すとその場で中身が開閉する(アコーディオン)。開閉の状態は保存する(既定は Select だけ開く)
 static NSMutableArray<NSValue *> *gBmItems;                 // 自前で足した項目(作り直すときに取り除く)
-static const struct { int tag; const char *icon, *name; const MItem *items; int n; } kAccCats[] = {
+typedef struct { int tag; const char *icon, *name; const MItem *items; int n; } AccCat;
+static const AccCat kAccCats[] = {
     { BM_TAG_CAT_SELECT, "ui-edit-icon12.png", "Select", kCatSelect, (int)(sizeof kCatSelect / sizeof *kCatSelect) },
     { BM_TAG_CAT_COPY, "ui-edit-icon8.png", "Copy / Paste", kCatCopy, (int)(sizeof kCatCopy / sizeof *kCatCopy) },
     { BM_TAG_CAT_MOVE, "ui-edit-icon14.png", "Move", kCatMove, (int)(sizeof kCatMove / sizeof *kCatMove) },
     { BM_TAG_CAT_EFFECT, "ui-edit-icon1.png", "Effect", kCatEffect, (int)(sizeof kCatEffect / sizeof *kCatEffect) },
     { BM_TAG_CAT_SPEC, "ui-edit-icon26.png", "Spectrogram", kCatSpec, (int)(sizeof kCatSpec / sizeof *kCatSpec) },
+};
+// Taiko のカテゴリ(taiko.inc の項目。Key / Slide と同じツリー型メニュー)
+static const MItem kCatTSel[] = {
+    { BM_TAG_TSEL, "ui-edit-icon12.png", "Select mode" }, { BM_TAG_TALL, "ui-edit-icon13.png", "Select all" },
+    { BM_TAG_TCLR, "ui-edit-icon21.png", "Deselect" }, { BM_TAG_TDEL, "ui-edit-icon25.png", "Delete selected" } };
+static const MItem kCatTHs[] = {
+    { BM_TAG_THS, "ui-edit-icon1.png", "Apply HS to selection" }, { BM_TAG_THR, "ui-edit-icon1.png", "HS ramp (start-end)" },
+    { BM_TAG_THM, "ui-edit-icon1.png", "HS multiply (range)" }, { BM_TAG_THC, "ui-edit-icon1.png", "HS clear (range)" },
+    { BM_TAG_THL, "ui-edit-icon1.png", "HS labels (show values)" } };
+static const MItem kCatTPaste[] = { { BM_TAG_TPM, "ui-edit-icon26.png", "Paste mirrored (don/ka)" } };
+static const MItem kCatTFx[] = { { BM_TAG_EASE, "ui-edit-icon1.png", "Ease effects..." }, { BM_TAG_SVG, "ui-edit-icon1.png", "SV graph" } };
+static const AccCat kAccTaiko[] = {
+    { BM_TAG_CAT_SELECT, "ui-edit-icon12.png", "Select", kCatTSel, (int)(sizeof kCatTSel / sizeof *kCatTSel) },
+    { BM_TAG_CAT_THS, "ui-edit-icon1.png", "HS", kCatTHs, (int)(sizeof kCatTHs / sizeof *kCatTHs) },
+    { BM_TAG_CAT_COPY, "ui-edit-icon8.png", "Copy / Paste", kCatTPaste, (int)(sizeof kCatTPaste / sizeof *kCatTPaste) },
+    { BM_TAG_CAT_EFFECT, "ui-edit-icon8.png", "Effect", kCatTFx, (int)(sizeof kCatTFx / sizeof *kCatTFx) },
 };
 static NSArray<NSNumber *> *acc_state(void) {
     NSArray *a = [NSUserDefaults.standardUserDefaults arrayForKey:@"bm.menu.open"];
@@ -1999,17 +2072,29 @@ static void menu_bm_build(void *self) {
     for (NSValue *v in gBmItems) VT(v.pointerValue, 608, void (*)(void *, int))(v.pointerValue, 1);   // removeFromParentAndCleanup(true)
     gBmItems = [NSMutableArray array];
     void *it;
-    for (size_t c = 0; c < sizeof kAccCats / sizeof *kAccCats; c++) {
-        BOOL open = acc_open(kAccCats[c].tag);
-        NSString *lb = [NSString stringWithFormat:@"%@ %s", open ? @"-" : @"+", kAccCats[c].name];
-        if ((it = add_menu_item(tb, kAccCats[c].icon, kAccCats[c].tag, lb.UTF8String))) [gBmItems addObject:[NSValue valueWithPointer:it]];
+    BOOL taiko = is_taiko(self);
+    const AccCat *cats = taiko ? kAccTaiko : kAccCats;
+    size_t nc = taiko ? sizeof kAccTaiko / sizeof *kAccTaiko : sizeof kAccCats / sizeof *kAccCats;
+    for (size_t c = 0; c < nc; c++) {
+        BOOL open = acc_open(cats[c].tag);
+        NSString *lb = [NSString stringWithFormat:@"%@ %s", open ? @"-" : @"+", cats[c].name];
+        if ((it = add_menu_item(tb, cats[c].icon, cats[c].tag, lb.UTF8String))) [gBmItems addObject:[NSValue valueWithPointer:it]];
         if (!open) continue;
-        for (int i = 0; i < kAccCats[c].n; i++) {
-            const MItem *m = &kAccCats[c].items[i];
+        for (int i = 0; i < cats[c].n; i++) {
+            const MItem *m = &cats[c].items[i];
             if (m->tag == BM_TAG_CAT_BACK) continue;
-            if (kAccCats[c].tag == BM_TAG_CAT_MOVE && !lay_of(self)->slide && (m->tag == BM_TAG_WIDTH || m->tag == BM_TAG_WIDTH_SD)) continue;   // Key: 幅の項目なし
-            NSString *sl = [@"    " stringByAppendingString:@(m->label)];
+            if (cats[c].tag == BM_TAG_CAT_MOVE && lay_of(self) && !lay_of(self)->slide && (m->tag == BM_TAG_WIDTH || m->tag == BM_TAG_WIDTH_SD)) continue;   // Key: 幅の項目なし
+            if (m->tag == BM_TAG_SELF && !(lay_of(self) && lay_of(self)->slide)) continue;   // 選択フィルタは Slide のみ
+            sf_load();
+            NSString *sl = [@"    " stringByAppendingString:m->tag == BM_TAG_SELF ? (gSf.on ? @"Select filter: ON" : @"Select filter: OFF") : (m->tag == BM_TAG_SVG ? (gSvgOn ? @"SV graph: ON" : @"SV graph: OFF") : @(m->label))];
             if ((it = add_menu_item(tb, m->icon, m->tag, sl.UTF8String))) [gBmItems addObject:[NSValue valueWithPointer:it]];
+            if (m->tag == BM_TAG_SELF && gSf.on) {
+                static const char *const nm[3] = { "Note", "Wipe", "Slide" };
+                for (int k = 0; k < 3; k++) {
+                    NSString *ssl = [NSString stringWithFormat:@"        [%@] %s", (gSf.mask >> k) & 1 ? @"x" : @" ", nm[k]];
+                    if ((it = add_menu_item(tb, "ui-edit-icon13.png", BM_TAG_SF_NOTE + k, ssl.UTF8String))) [gBmItems addObject:[NSValue valueWithPointer:it]];
+                }
+            }
         }
     }
     if ((it = add_menu_item(tb, "ui-edit-icon28.png", BM_TAG_PDEV, "Plugin Dev..."))) [gBmItems addObject:[NSValue valueWithPointer:it]];
@@ -2017,7 +2102,7 @@ static void menu_bm_build(void *self) {
     ((void (*)(void *, int))VA(0x100048FF8ULL))(menu_list(tb), 0);   // 0 = スクロール位置を先頭へ(1 だと伸びた分だけ下端基準で見える)
 }
 static void sel_add_menu_items(void *self) {   // 「その他」メニューにカテゴリ項目を追加(エディタごとに1回)
-    if (gSelMenuFor == self || !lay_of(self)) return;
+    if (gSelMenuFor == self || !(lay_of(self) || is_taiko(self))) return;
     gSelMenuFor = self;
     gBmItems = nil;                                       // 前のエディタの項目は破棄済み
     menu_bm_build(self);
@@ -2223,8 +2308,7 @@ static intptr_t hook_touch(void *self, int ev, void *node, void *pos) {
         if (isMod > 0) node = *(void **)((uint8_t *)self + 1032);
     }
     if (self != gEditor && gPreview) gPreview = NO;   // 別のエディタ(再入場)では preview を解除
-    if (lay_of(self) && !gMenuSwapped) sel_add_menu_items(self);
-    else if (is_taiko(self) && !gMenuSwapped) taiko_add_menu_items(self);
+    if ((lay_of(self) || is_taiko(self)) && !gMenuSwapped) sel_add_menu_items(self);
     if (node && ev != 7) {
         int tag = ((int (*)(void *))(*(void ***)node)[0x2a0 / 8])(node);
         if (taiko_menu_click(self, node, ev, tag)) return 0;
@@ -2319,7 +2403,7 @@ static intptr_t hook_touch(void *self, int ev, void *node, void *pos) {
             }
             return 0;
         }
-        if (tag >= BM_TAG_CAT_SELECT && tag <= BM_TAG_CAT_SPEC && lay_of(self)) {   // カテゴリ項目: 中身のサブメニューを表示
+        if (((tag >= BM_TAG_CAT_SELECT && tag <= BM_TAG_CAT_SPEC) || tag == BM_TAG_CAT_THS) && (lay_of(self) || is_taiko(self))) {   // カテゴリ項目: 中身のサブメニューを表示
             if (ev == 3) {
                 gEditor = self;
                 int cat = tag;
@@ -2471,6 +2555,48 @@ static intptr_t hook_touch(void *self, int ev, void *node, void *pos) {
         }
         if ((tag == BM_TAG_FX_COPY || tag == BM_TAG_FX_PASTE || tag == BM_TAG_FX_DEL) && lay_of(self)) {
             if (ev == 3 && !*((uint8_t *)self + 903)) fx_range_op(self, tag);
+            return 0;
+        }
+        if (tag == BM_TAG_SVG && (lay_of(self) || is_taiko(self))) {   // SV グラフの ON/OFF
+            if (ev == 3) {
+                gEditor = self;
+                gSvgOn = !gSvgOn; gSvgToast = YES; gSvgHash = 0;
+                [NSUserDefaults.standardUserDefaults setBool:gSvgOn forKey:@"bm.svg.on"];
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    menu_bm_build(self);
+                    void *tb = (uint8_t *)self + 1400;
+                    VT(menu_popup(tb), 336, void (*)(void *, int))(menu_popup(tb), 1);
+                    ed_toast_text(self, gSvgOn ? "SV graph: ON" : "SV graph: OFF", 4);
+                });
+            }
+            return 0;
+        }
+        if (tag == BM_TAG_EASE && (lay_of(self) || is_taiko(self))) {   // 組み込みプラグイン(全モード共通)
+            if (ev == 3 && !*((uint8_t *)self + 903)) {
+                gEditor = self;
+                dispatch_async(dispatch_get_main_queue(), ^{ bm_run_builtin(self, @"bm_ease.lua"); });   // メニューが閉じてから
+            }
+            return 0;
+        }
+        if ((tag == BM_TAG_SELF || (tag >= BM_TAG_SF_NOTE && tag <= BM_TAG_SF_SLIDE)) && lay_of(self) && lay_of(self)->slide) {   // 選択フィルタ(Slide): ON/OFF と種類の切替
+            if (ev == 3 && !*((uint8_t *)self + 903)) {
+                gEditor = self;
+                sf_load();
+                BOOL narrow = NO;
+                if (tag == BM_TAG_SELF) { gSf.on = !gSf.on; narrow = gSf.on; }
+                else { int k = tag - BM_TAG_SF_NOTE; gSf.mask ^= 1 << k; narrow = !((gSf.mask >> k) & 1); }
+                sf_save();
+                char msg[96];
+                if (gSf.on) snprintf(msg, sizeof msg, "Select filter ON: %s", sf_summary().UTF8String); else snprintf(msg, sizeof msg, "Select filter OFF");
+                NSString *msgS = @(msg);
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (narrow && gSf.on) sf_narrow(self);               // ON にした / 種類を外した時点で、今の選択も絞り込む
+                    menu_bm_build(self);
+                    void *tb = (uint8_t *)self + 1400;
+                    VT(menu_popup(tb), 336, void (*)(void *, int))(menu_popup(tb), 1);
+                    ed_toast_text(self, msgS.UTF8String, 4);
+                });
+            }
             return 0;
         }
         if (tag == BM_TAG_BPM_ICON && (lay_of(self) || is_taiko(self))) {          // BPM アイコン: 選択メニュー(BPM / Effect)
@@ -3030,6 +3156,291 @@ static void spec_update(void *ed) {
 }
 
 
+// ---- SV グラフ: レーンに薄く重ねる scroll(Key / Slide)の折れ線 ----
+// 時間は縦(スペクトログラムと同じ。タイルは専用の入れ物へ、ノートの背面)、横 = 値(その譜面の最小〜最大を自動で収める)。
+// 値は effect の scroll を拍順にたどった階段(未設定は直前を引き継ぐ。最初は 1.0)。縦の薄い線 = 値 1.0(白)と 0(灰)。
+// jump = その拍に横線(正 = 橙 / 負 = 水色。長さは大きさ)。FX プレビュー中は G で歪んだ位置に重なる。
+#define SVG_W 128
+#define SVG_TILE_BEATS 4
+#define SVG_RPB 32
+typedef struct { double beat, v, jump; } SvgPt;
+static SvgPt *gSvgPts; static int gSvgN; static double gSvgVMin = 0, gSvgVMax = 2;
+static void *gSvgEditor, *gSvgHolder;
+static NSMutableDictionary<NSNumber *, NSValue *> *gSvgTiles;
+static int gSvgAlpha = 130;
+static int svg_kind(void *ed) { return is_taiko(ed) ? 1 : 0; }   // 0 = scroll / 1 = hs
+static uint64_t svg_scan(void *outer, int kind, SvgPt **out, int *outN) {   // effect の deque → 点列(拍順。値は引き継ぎ済み)と、変化の検出用ハッシュ
+    deq *q = (deq *)((uint8_t *)outer + OFF_EFFQ);
+    if (!deq_sane(q, 112)) { if (out) *out = NULL; if (outN) *outN = 0; return 0; }
+    int fl = kind ? 48 : 32, vo = kind ? 56 : 40;
+    size_t n = q->size;
+    SvgPt *a = out ? calloc(n ? n : 1, sizeof *a) : NULL;
+    double cur = 1.0; uint64_t h = 1469598103934665603ULL ^ n;
+    for (size_t i = 0; i < n; i++) {
+        uint8_t *e = deq_at(q, i);
+        if (!e) continue;
+        double b = beat_key(e), jump = e[88] ? 0.0 : *(double *)(e + 96);
+        if (!e[fl]) cur = *(double *)(e + vo);
+        if (a) a[i] = (SvgPt){ b, cur, jump };
+        uint64_t x; double t[3] = { b, cur, jump };
+        for (int k = 0; k < 3; k++) { memcpy(&x, &t[k], 8); h = (h ^ x) * 1099511628211ULL; }
+    }
+    if (out) *out = a; if (outN) *outN = (int)n;
+    return h;
+}
+static double svg_v_at(double b) {   // beat の値(その拍以前で最後の点。無ければ 1.0)
+    int lo = 0, hi = gSvgN - 1, r = -1;
+    while (lo <= hi) { int m = (lo + hi) / 2; if (gSvgPts[m].beat <= b + 1e-9) { r = m; lo = m + 1; } else hi = m - 1; }
+    return r < 0 ? 1.0 : gSvgPts[r].v;
+}
+typedef struct { double v, w; } SvgVW;
+static int svg_cmp_vw(const void *a, const void *b) { double x = ((const SvgVW *)a)->v, y = ((const SvgVW *)b)->v; return x < y ? -1 : (x > y); }
+// 横幅の範囲 = 値 1.0 を中心に左右対称。|v| > 100 は外れ値(隠し用の -10000 など)として範囲の計算からも描画からも除き、残りの値の 1.0 からの距離を
+// 時間で重みをつけて 97% 分収める幅にする(最低でも 0〜2)。範囲を外れた値は描かない。
+static void svg_window(const SvgPt *pts, int n, double *mn, double *mx) {
+    double half = 1.0;
+    if (n > 0) {
+        SvgVW *vw = calloc((size_t)n, sizeof *vw); double tot = 0; int m = 0;
+        for (int i = 0; i < n; i++) {
+            if (fabs(pts[i].v) > 100.0) continue;
+            double w = i + 1 < n ? pts[i + 1].beat - pts[i].beat : 4.0;
+            vw[m++] = (SvgVW){ fabs(pts[i].v - 1.0), w > 0 ? w : 1e-6 }; tot += vw[m - 1].w;
+        }
+        if (m) {
+            qsort(vw, (size_t)m, sizeof *vw, svg_cmp_vw);
+            double acc = 0, p = vw[m - 1].v;
+            for (int i = 0; i < m; i++) { acc += vw[i].w; if (acc >= tot * 0.97) { p = vw[i].v; break; } }
+            half = fmax(1.0, p * 1.1);
+        }
+        free(vw);
+    }
+    *mn = 1.0 - half; *mx = 1.0 + half;
+}
+static int svg_x(double v) {   // 値 → 列
+    double t = (v - gSvgVMin) / (gSvgVMax - gSvgVMin);
+    int x = (int)lround(2 + t * (SVG_W - 5));
+    return x < 1 ? 1 : (x > SVG_W - 3 ? SVG_W - 3 : x);
+}
+static void svg_px(uint8_t *px, int hh, int r, int x, int w, const uint8_t c[4]) {
+    for (int i = 0; i < w; i++) { int xx = x + i; if (xx < 0 || xx >= SVG_W || r < 0 || r >= hh) continue; memcpy(px + ((size_t)r * SVG_W + xx) * 4, c, 4); }
+}
+static void *svg_make_tile(void *ed, int k) {
+    const int HH = SVG_TILE_BEATS * SVG_RPB;
+    uint8_t *px = calloc((size_t)SVG_W * HH, 4);
+    static const uint8_t cBase1[4] = { 255, 255, 255, 90 }, cBase0[4] = { 160, 160, 160, 70 }, cLine[4] = { 110, 255, 150, 255 };
+    static const uint8_t cJP[4] = { 255, 170, 60, 230 }, cJN[4] = { 90, 210, 255, 230 };
+    int x1 = svg_x(1.0), x0 = svg_x(0.0);
+    for (int r = 0; r < HH; r++) {
+        double b0 = (double)(k + 1) * SVG_TILE_BEATS - (r + 1.0) / SVG_RPB, b1 = b0 + 1.0 / SVG_RPB;
+        svg_px(px, HH, r, x1, 1, cBase1);
+        if (gSvgVMin < 0) svg_px(px, HH, r, x0, 1, cBase0);
+        double va = svg_v_at(b0), vb = svg_v_at(b1 - 1e-7);
+        int xa = svg_x(va), xb = svg_x(vb);
+        int lo = xa < xb ? xa : xb, hi = xa < xb ? xb : xa;
+        BOOL out = va < gSvgVMin || va > gSvgVMax || vb < gSvgVMin || vb > gSvgVMax;   // 外れ値は無視(描かない)
+        if (!out) svg_px(px, HH, r, lo, hi - lo + 2, cLine);
+        for (int i = 0; i < gSvgN; i++) {   // この行に入る jump
+            if (gSvgPts[i].beat < b0 - 1e-9 || gSvgPts[i].beat >= b1 - 1e-9 || gSvgPts[i].jump == 0) continue;
+            double j = gSvgPts[i].jump; int len = (int)fmin(SVG_W, 16 + fabs(j) * 0.05);
+            for (int rr = r; rr <= r + 1; rr++) svg_px(px, HH, rr, 2, len, j > 0 ? cJP : cJN);
+        }
+    }
+    struct { void *addr; size_t len; } mip = { px, (size_t)SVG_W * HH * 4 };
+    void *tex = calloc(1, 0x30);
+    ((void (*)(void *))VA(0x1005783E8ULL))(tex);
+    long ok = ((long (*)(void *, void *, int, int, long, long))VA(0x100578504ULL))(tex, &mip, 1, 2, SVG_W, HH);
+    free(px);
+    if (!ok) { os_log(L, "svg: texture init failed"); return NULL; }
+    void *sp = calloc(1, 0x3E0);
+    ((void *(*)(void *))VA(0x10056ADCCULL))(sp);
+    if (!VT(sp, 1344, long (*)(void *, void *))(sp, tex)) { os_log(L, "svg: sprite init failed"); return NULL; }
+    ((void (*)(void *))VA(0x100588938ULL))(sp);
+    float a0[2] = { 0, 0 };
+    VT(sp, 296, void (*)(void *, float *))(sp, a0);
+    VT(sp, 1032, void (*)(void *, int))(sp, gSvgAlpha);
+    return sp;
+}
+static void *svg_sprite_from_pixels(uint8_t *px, int w, int hh) {   // RGBA の画素 → Sprite(px は呼び出し側が確保。ここで解放する)
+    struct { void *addr; size_t len; } mip = { px, (size_t)w * hh * 4 };
+    void *tex = calloc(1, 0x30);
+    ((void (*)(void *))VA(0x1005783E8ULL))(tex);
+    long ok = ((long (*)(void *, void *, int, int, long, long))VA(0x100578504ULL))(tex, &mip, 1, 2, w, hh);
+    free(px);
+    if (!ok) { os_log(L, "svg: texture init failed"); return NULL; }
+    void *sp = calloc(1, 0x3E0);
+    ((void *(*)(void *))VA(0x10056ADCCULL))(sp);
+    if (!VT(sp, 1344, long (*)(void *, void *))(sp, tex)) { os_log(L, "svg: sprite init failed"); return NULL; }
+    ((void (*)(void *))VA(0x100588938ULL))(sp);
+    float a0[2] = { 0, 0 };
+    VT(sp, 296, void (*)(void *, float *))(sp, a0);
+    VT(sp, 1032, void (*)(void *, int))(sp, gSvgAlpha);
+    return sp;
+}
+// Taiko: 時間は横(画像の列)、縦 = 値(上 = 大きい)。階段の縦の継ぎ目と、jump(縦線)も同様に描く
+#define SVG_TH 64
+static void *svg_make_tile_h(void *ed, int k) {
+    const int WW = SVG_TILE_BEATS * SVG_RPB, HH = SVG_TH;
+    uint8_t *px = calloc((size_t)WW * HH, 4);
+    static const uint8_t cBase1[4] = { 255, 255, 255, 90 }, cBase0[4] = { 160, 160, 160, 70 }, cLine[4] = { 110, 255, 150, 255 };
+    static const uint8_t cJP[4] = { 255, 170, 60, 230 }, cJN[4] = { 90, 210, 255, 230 };
+    #define ROW_OF(v) ({ double t_ = ((v) - gSvgVMin) / (gSvgVMax - gSvgVMin); int r_ = (int)lround((1.0 - t_) * (HH - 1)); r_ < 0 ? 0 : (r_ > HH - 1 ? HH - 1 : r_); })
+    #define PUT(cc, rr, col) do { int c__ = (cc), r__ = (rr); if (c__ >= 0 && c__ < WW && r__ >= 0 && r__ < HH) memcpy(px + ((size_t)r__ * WW + c__) * 4, (col), 4); } while (0)
+    int r1 = ROW_OF(1.0), r0 = ROW_OF(0.0);
+    for (int c = 0; c < WW; c++) {
+        double b0 = (double)k * SVG_TILE_BEATS + (double)c / SVG_RPB, b1 = b0 + 1.0 / SVG_RPB;
+        PUT(c, r1, cBase1);
+        if (gSvgVMin < 0) PUT(c, r0, cBase0);
+        double va = svg_v_at(b0), vb = svg_v_at(b1 - 1e-7);
+        BOOL out = va < gSvgVMin || va > gSvgVMax || vb < gSvgVMin || vb > gSvgVMax;   // 外れ値は無視(描かない)
+        if (!out) {
+            int ra = ROW_OF(va), rb = ROW_OF(vb), lo = ra < rb ? ra : rb, hi = ra < rb ? rb : ra;
+            for (int r = lo; r <= hi + 1; r++) PUT(c, r, cLine);
+        }
+        for (int i = 0; i < gSvgN; i++) {
+            if (gSvgPts[i].beat < b0 - 1e-9 || gSvgPts[i].beat >= b1 - 1e-9 || gSvgPts[i].jump == 0) continue;
+            double j = gSvgPts[i].jump; int len = (int)fmin(HH, 12 + fabs(j) * 0.04);
+            for (int cc = c; cc <= c + 1; cc++) for (int r = 0; r < len; r++) PUT(cc, HH - 1 - r, j > 0 ? cJP : cJN);
+        }
+    }
+    #undef ROW_OF
+    #undef PUT
+    return svg_sprite_from_pixels(px, WW, HH);
+}
+static void *svg_holder(void *ed) {
+    if (gSvgHolder) return gSvgHolder;
+    void *h = ((void *(*)(void))VA(0x100544A64ULL))();
+    if (!h) return NULL;
+    int zo = spec_z_offset(ed);
+    void *cont = *(void **)((uint8_t *)ed + (is_taiko(ed) ? 1792 : 1472));   // ノートの容器(Taiko は +1792)
+    int z = (zo >= 0 && cont) ? *(int *)((uint8_t *)cont + zo) - 1 : -1;
+    os_log(L, "svg: holder z=%d (zOrder offset %d, container %p)", z, zo, cont);
+    VT(ed, 504, void (*)(void *, void *, int))(ed, h, z);
+    gSvgHolder = h;
+    return h;
+}
+static void svg_hide_all(void) { for (NSValue *v in gSvgTiles.allValues) VT(v.pointerValue, 336, void (*)(void *, int))(v.pointerValue, 0); }
+static void svg_drop_tiles(void) {
+    for (NSValue *v in gSvgTiles.allValues) VT(v.pointerValue, 608, void (*)(void *, int))(v.pointerValue, 1);
+    [gSvgTiles removeAllObjects];
+}
+static void svg_update(void *ed) {
+    const Lay *l = lay_of(ed);
+    BOOL taiko = !l && is_taiko(ed);
+    if (!l && !taiko) return;
+    static BOOL loaded;
+    if (!loaded) { loaded = YES; gSvgOn = [NSUserDefaults.standardUserDefaults boolForKey:@"bm.svg.on"]; }
+    if (gSvgEditor != ed) { gSvgEditor = ed; gSvgHolder = NULL; gSvgTiles = [NSMutableDictionary dictionary]; gSvgHash = 0; }
+    if (!gSvgOn) { if (gSvgTiles.count) svg_hide_all(); return; }
+    void *outer = *(void **)((uint8_t *)ed + 0x2d8);
+    if (!outer) return;
+    static int frame;
+    if (gSvgHash == 0 || (++frame % 15) == 0) {   // 変化の検出(effect の追加 / 削除 / 値の変更)
+        SvgPt *pts = NULL; int n = 0;
+        uint64_t h = svg_scan(outer, svg_kind(ed), &pts, &n);
+        if (h != gSvgHash || !gSvgTiles.count) {
+            if (h != gSvgHash) {
+                free(gSvgPts); gSvgPts = pts; gSvgN = n; gSvgHash = h ? h : 1;
+                double lo = 1, hi = 1, mn, mx;
+                for (int i = 0; i < n; i++) { if (pts[i].v < lo) lo = pts[i].v; if (pts[i].v > hi) hi = pts[i].v; }
+                svg_window(pts, n, &mn, &mx);
+                gSvgVMin = mn; gSvgVMax = mx;
+                os_log(L, "svg: scan kind=%d n=%d range=[%g,%g] seen=[%g,%g]", svg_kind(ed), n, gSvgVMin, gSvgVMax, lo, hi);
+                if (gSvgToast) { gSvgToast = NO; char m[96]; snprintf(m, sizeof m, "SV graph: %s %g ~ %g (%d effects)", svg_kind(ed) ? "hs" : "scroll", lo, hi, n); ed_toast_text(ed, m, 4); }
+                svg_drop_tiles();
+            } else free(pts);
+        } else free(pts);
+    }
+    void *h = svg_holder(ed);
+    void *cont = taiko ? NULL : *(void **)((uint8_t *)ed + 1472);
+    if (!h || (!taiko && !cont)) return;
+    if (taiko) {   // Taiko: 入れ物はエディタ空間のまま(位置・拡縮は動かさない)。タイルは毎フレーム、ノートの容器(+1792)の x に合わせて置く
+        uint8_t *te = (uint8_t *)ed;
+        double K = (double)(*(float *)(te + 2580) * *(float *)(te + 2584));
+        float W = *(float *)(te + 664), yc = *(float *)(te + 2072), band = *(float *)(te + 2080);
+        void *tc = *(void **)(te + 1792);
+        if (!h || !tc || K < 1e-3 || band < 1) return;
+        float cx = VT(tc, 192, float (*)(void *))(tc);
+        double pos = *(double *)(te + 872), span = W / K;
+        { static int dn; if ((dn++ % 300) == 0) os_log(L, "svg: taiko geom cx=%.1f K=%.2f W=%.1f yc=%.1f band=%.1f pos=%.2f tiles=%lu holder=%p", cx, K, W, yc, band, pos, (unsigned long)gSvgTiles.count, h); }
+        int kmin = (int)floor((pos - span * 1.0) / SVG_TILE_BEATS), kmax = (int)floor((pos + span * 1.6) / SVG_TILE_BEATS);
+        if (kmin < -1) kmin = -1;
+        for (NSNumber *kn in gSvgTiles.allKeys) { int kk = kn.intValue; if (kk < kmin || kk > kmax) VT(gSvgTiles[kn].pointerValue, 336, void (*)(void *, int))(gSvgTiles[kn].pointerValue, 0); }
+        int made = 0;
+        for (int k = kmin; k <= kmax; k++) {
+            NSValue *tv = gSvgTiles[@(k)];
+            if (!tv) {
+                if (made >= 2) continue;
+                void *sp = svg_make_tile_h(ed, k);
+                if (!sp) continue;
+                VT(h, 504, void (*)(void *, void *, int))(h, sp, 0);
+                made++;
+                tv = [NSValue valueWithPointer:sp]; gSvgTiles[@(k)] = tv;
+            }
+            void *sp = tv.pointerValue;
+            double bs = (double)k * SVG_TILE_BEATS, be = bs + SVG_TILE_BEATS;
+            double xs = cx + K * G(bs), xe = cx + K * G(be);
+            float xLeft = (float)fmin(xs, xe), ww = (float)fabs(xe - xs);
+            if (ww < 0.5f) { VT(sp, 336, void (*)(void *, int))(sp, 0); continue; }
+            float pp[2] = { xLeft, yc - band * 0.5f };
+            VT(sp, 136, void (*)(void *, float *))(sp, pp);
+            ((float (*)(void *, float, float))VA(0x10054471CULL))(sp, ww, band);
+            VT(sp, 1032, void (*)(void *, int))(sp, gSvgAlpha);
+            VT(sp, 336, void (*)(void *, int))(sp, 1);
+        }
+        return;
+    }
+    {   // 入れ物の位置と拡縮は容器に合わせる(スペクトログラムと同じ)
+        float p[2] = { VT(cont, 192, float (*)(void *))(cont), VT(cont, 208, float (*)(void *))(cont) };
+        VT(h, 136, void (*)(void *, float *))(h, p);
+        *(float *)((uint8_t *)h + 64) = *(float *)((uint8_t *)cont + 64);
+        *(float *)((uint8_t *)h + 68) = *(float *)((uint8_t *)cont + 68);
+        uint8_t *b = (uint8_t *)h; b[168] = 1; b[368] = 1; b[300] = 1; b[437] = 1;
+    }
+    uint8_t *e = (uint8_t *)ed;
+    float H0 = LF(ed, 128);
+    float K = LF(ed, l->zoom) * LF(ed, l->base);
+    float off = l->off >= 0 ? LF(ed, l->off) : 0.0f;
+    if (K < 1e-3f || H0 < 1) return;
+    float x0, xw;
+    if (!l->slide) {
+        int cnt = e[1700]; if (cnt < 1) cnt = 1;
+        x0 = LF(ed, 1632);
+        xw = LF(ed, 1632 + 4 * (cnt - 1)) + LF(ed, 1672) - x0;
+    } else { x0 = 0; xw = LF(ed, 1696); }
+    { static int dn; if ((dn++ % 300) == 0) os_log(L, "svg: geom x0=%.1f xw=%.1f K=%.2f H0=%.1f off=%.1f tiles=%lu holder=%p", x0, xw, K, H0, off, (unsigned long)gSvgTiles.count, h); }
+    double pos = *(double *)(e + 872);
+    double span = H0 / K;
+    int kmin = (int)floor((pos - span * 0.6) / SVG_TILE_BEATS), kmax = (int)floor((pos + span * 1.6) / SVG_TILE_BEATS);
+    if (kmin < -1) kmin = -1;
+    for (NSNumber *kn in gSvgTiles.allKeys) {
+        int kk = kn.intValue;
+        if (kk < kmin || kk > kmax) VT(gSvgTiles[kn].pointerValue, 336, void (*)(void *, int))(gSvgTiles[kn].pointerValue, 0);
+    }
+    int made = 0;
+    for (int k = kmin; k <= kmax; k++) {
+        NSValue *tv = gSvgTiles[@(k)];
+        if (!tv) {
+            if (made >= 2) continue;
+            void *sp = svg_make_tile(ed, k);
+            if (!sp) continue;
+            VT(h, 504, void (*)(void *, void *, int))(h, sp, 0);
+            made++;
+            tv = [NSValue valueWithPointer:sp]; gSvgTiles[@(k)] = tv;
+        }
+        void *sp = tv.pointerValue;
+        double bs = (double)k * SVG_TILE_BEATS, be = bs + SVG_TILE_BEATS;
+        double ys = K * (G(bs) - gG0) - off, ye = K * (G(be) - gG0) - off;
+        float yLow = (float)fmin(ys, ye), hh = (float)fabs(ye - ys);
+        if (hh < 0.5f) { VT(sp, 336, void (*)(void *, int))(sp, 0); continue; }
+        float pp[2] = { x0, yLow };
+        VT(sp, 136, void (*)(void *, float *))(sp, pp);
+        ((float (*)(void *, float, float))VA(0x10054471CULL))(sp, xw, hh);
+        VT(sp, 1032, void (*)(void *, int))(sp, gSvgAlpha);
+        VT(sp, 336, void (*)(void *, int))(sp, 1);
+    }
+}
+
+
 // ---- オフセット検証: 強いアタックと拍グリッド(1/4拍)のズレを集計し、提案オフセットを示す ----
 static double spec_beat_of_ms(double ms) {   // spec_ms_of_beat の逆写像(単調なので二分探索)
     double lo = -4.0, hi = 20000.0;
@@ -3103,7 +3514,7 @@ static void spec_offset_check(void *ed) {
 
 #include "modules.inc"
 static void hook_refresh_inner(void *a1, float dt);
-static void hook_refresh(void *a1, float dt) { hook_refresh_inner(a1, dt); if (lay_of(a1)) { kb_tick(a1); ovl_update(a1); spec_update(a1); mod_update(a1); un_tick(a1); pl_right_tick(a1); more_sync(a1); } }
+static void hook_refresh(void *a1, float dt) { hook_refresh_inner(a1, dt); if (lay_of(a1)) { kb_tick(a1); ovl_update(a1); spec_update(a1); svg_update(a1); mod_update(a1); un_tick(a1); pl_right_tick(a1); more_sync(a1); } }
 static void hook_refresh_inner(void *a1, float dt) {   // sub_1001B0AF0 = 毎フレーム update(dt)
     if (gPreview && a1 == gEditor) {
         ((void (*)(void *, float))VA(0x100075D2CULL))(a1, dt);   // 元の先頭呼び出し(基底の位置更新)
@@ -3688,7 +4099,7 @@ static void slide_grid_keep(void *ed) {
     }
     if (g[0] != sv[0] || g[1] != sv[1]) { sv[0] = g[0]; sv[1] = g[1]; have = YES; os_log(L, "grid: saved align=%d lines=%d", sv[0], sv[1]); }
 }
-static void hook_s_refresh(void *a1, float dt) { hook_s_refresh_inner(a1, dt); if (lay_of(a1)) { kb_tick(a1); ovl_update(a1); spec_update(a1); mod_update(a1); un_tick(a1); slide_grid_keep(a1); pl_right_tick(a1); more_sync(a1); { static int f; if ((++f % 10) == 0 && (gOrdNotes.count || gOrdTinted.count)) ord_tint_sync(a1); } } }
+static void hook_s_refresh(void *a1, float dt) { hook_s_refresh_inner(a1, dt); if (lay_of(a1)) { kb_tick(a1); ovl_update(a1); spec_update(a1); svg_update(a1); mod_update(a1); un_tick(a1); slide_grid_keep(a1); pl_right_tick(a1); more_sync(a1); { static int f; if ((++f % 10) == 0 && (gOrdNotes.count || gOrdTinted.count)) ord_tint_sync(a1); } } }
 static void hook_s_refresh_inner(void *a1, float dt) {   // sub_1000C5408 = EditorSlide update
     if (gPreview) {
         static int cnt; static double lastPos = -1e9;
@@ -3926,6 +4337,10 @@ __attribute__((constructor)) static void bm_init(void) {
     orig_pathhit = (pathhit_fn)VA(0x1000053C8ULL); slots[42] = (void *)hook_pathhit;          // pathhit(cave 0x1000053B8 + 16): 重複 beat のスライドの当たり判定の誤判定を外す
     orig_store = (store_fn)VA(0x100005440ULL); slots[47] = (void *)hook_store;                      // store(cave 0x100005430 + 16): osu! ストア選択時は中継サーバーへ
     orig_storetouch = (storetouch_fn)VA(0x100005458ULL); slots[48] = (void *)hook_storetouch;       // storetouch(cave 0x100005448 + 16): ストア画面の切替ボタン
+#ifdef BM_MPSHARE
+    orig_tcprecv = (tcprecv_fn)VA(0x100005470ULL); slots[49] = (void *)hook_tcprecv;                // tcprecv(cave 0x100005460 + 16): マルチの受信フレームを記録(実験)
+    dispatch_async(dispatch_get_main_queue(), ^{ mp_boot(); });
+#endif
     slots[43] = (void *)hook_notecmp;                                                              // notecmp(cave 0x1000053D0): 分数の比較を 64bit に
     orig_chit = (chit_fn)VA(0x100005428ULL); slots[46] = (void *)hook_chit;                           // chit(cave 0x100005418 + 16)
     orig_s2wipe = (s2w_fn)VA(0x1000053F8ULL); slots[44] = (void *)hook_s2wipe;                     // s2wipe(cave 0x1000053E8 + 16)

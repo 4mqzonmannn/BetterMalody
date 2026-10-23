@@ -23,6 +23,7 @@ typedef struct {
     int    (*del)(int id);
     int    (*add)(int type);                    // 新規ノートの ID。失敗は -1
     int    (*select)(int id);
+    void   (*sel_clear)(void);                 // BM 拡張: 選択を全解除
     int    (*seg_count)(int id);
     int    (*seg_beat)(int id, int i, LHBeat *out);
     int    (*seg_x)(int id, int i);

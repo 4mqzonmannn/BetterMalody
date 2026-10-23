@@ -25,7 +25,8 @@ static int m_setx(int id, int x) { (void)id; (void)x; gCalls++; return 1; }
 static int m_setw(int id, int w) { (void)id; (void)w; gCalls++; return 1; }
 static int m_del(int id) { (void)id; gCalls++; return 1; }
 static int m_add(int type) { (void)type; return NN + gAdded++; }
-static int m_select(int id) { (void)id; return 1; }
+static int m_select(int id) { if (getenv("HARNESS_V")) printf("    SelectNote %d\n", id); return 1; }
+static void m_selclear(void) { printf("    ClearSelection\n"); }
 static int m_segc(int id) { (void)id; return gMode == 7 ? 3 : 0; }
 static int m_segb(int id, int i, LHBeat *o) { (void)id; *o = (LHBeat){ i, 0, 1 }; return 1; }
 static int m_segx(int id, int i) { (void)id; return i * 30; }
@@ -107,7 +108,7 @@ static LHHost mk(void) {
     LHHost h = { 0 };
     h.mode = gMode; h.sel = m_sel; h.count = m_count; h.at = m_at; h.type = m_type; h.x = m_x; h.width = m_w; h.flag = m_flag;
     h.beat = m_beat; h.time_ms = m_time; h.set_beat = m_setbeat; h.set_x = m_setx; h.set_width = m_setw; h.del = m_del;
-    h.add = m_add; h.select = m_select; h.seg_count = m_segc; h.seg_beat = m_segb; h.seg_x = m_segx; h.cur_beat = m_curbeat;
+    h.add = m_add; h.select = m_select; h.sel_clear = m_selclear; h.seg_count = m_segc; h.seg_beat = m_segb; h.seg_x = m_segx; h.cur_beat = m_curbeat;
     h.cur_time = m_curtime; h.cur_div = m_curdiv; h.toast = m_toast; h.chart_info = m_info; h.bpm_count = m_bpmc;
     h.bpm_at = m_bpmat; h.fx_count = m_fxc; h.fx_at = m_fxat; h.seg_add = m_segadd; h.seg_set_x = m_segsetx;
     h.seg_clear = m_segclear; h.data_get = m_dget; h.data_set = m_dset; h.file_read = m_fread; h.file_write = m_fwrite;
@@ -131,6 +132,7 @@ static void drain(LHSession *s, const LHHost *h) {
             if (lh_choice_deliver(e.s, e.id, e.d[1] - '0', 1, err, sizeof err)) printf("    ERROR(choice cb): %s\n", err);
             continue;
         }
+        if (!gInputAnswer[0] && getenv("HARNESS_IN")) snprintf(gInputAnswer, sizeof gInputAnswer, "%s", getenv("HARNESS_IN"));
         const char *ans = gInputAnswer[0] ? gInputAnswer : e.d[0] ? e.d : "1";
         if (lh_input_deliver(e.s, e.id, ans, err, sizeof err)) printf("    ERROR(input cb): %s\n", err);
     }

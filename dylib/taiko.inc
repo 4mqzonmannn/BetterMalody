@@ -437,24 +437,6 @@ static void t_hs_range_op(void *a1, int mode, double f) {
     ed_toast_text(a1, msg, 4);
     os_log(L, "taiko hs range op: mode=%d f=%g changed=%d puts=%lu", mode, f, changed, (unsigned long)puts.count);
 }
-// 「その他」メニューへ Taiko 用の項目を足す(右ツールメニューは 9 枠が埋まっていて足せない): 選択モード / 全選択 / 解除 / 選択を削除
-static void *gTMenuFor;
-static void taiko_add_menu_items(void *self) {
-    if (gTMenuFor == self) return;
-    gTMenuFor = self;
-    void *tb = (uint8_t *)self + 1400;
-    add_menu_item(tb, "ui-edit-icon12.png", BM_TAG_TSEL, "Select mode");
-    add_menu_item(tb, "ui-edit-icon13.png", BM_TAG_TALL, "Select all");
-    add_menu_item(tb, "ui-edit-icon21.png", BM_TAG_TCLR, "Deselect");
-    add_menu_item(tb, "ui-edit-icon25.png", BM_TAG_TDEL, "Delete selected");
-    add_menu_item(tb, "ui-edit-icon1.png", BM_TAG_THS, "Apply HS to selection");
-    add_menu_item(tb, "ui-edit-icon1.png", BM_TAG_THR, "HS ramp (start-end)");
-    add_menu_item(tb, "ui-edit-icon1.png", BM_TAG_THM, "HS multiply (range)");
-    add_menu_item(tb, "ui-edit-icon1.png", BM_TAG_THC, "HS clear (range)");
-    add_menu_item(tb, "ui-edit-icon1.png", BM_TAG_THL, "HS labels (show values)");
-    add_menu_item(tb, "ui-edit-icon26.png", BM_TAG_TPM, "Paste mirrored (don/ka)");
-    add_menu_item(tb, "ui-edit-icon28.png", BM_TAG_PDEV, "Plugin Dev...");
-}
 // 右ツールメニューのボタン(tag 88)/ 他のツール選択でのモード解除。hook_touch から呼ぶ(戻り値 1 = 処理した)
 // 反転ペースト: 標準の貼り付け(vtable +1728)を使い、クリップボード内の don/ka(種類 0↔2, 1↔3)を入れ替えてから貼る。貼った後はクリップボードを元に戻す
 static void t_clip_swap(void *a1) {
@@ -741,6 +723,7 @@ static void hook_trefresh(void *a1, float dt) {      // sub_10013EDF8(EditorTaik
         if (fabs(gp - gTgPos) * t_K(a1) > *(float *)((uint8_t *)a1 + 664) * 0.4) t_grid(a1);   // 画面幅の 0.4 倍動いたらグリッドを作り直す
     }
     if (a1 == gEditor || a1 == gHsLblEd) t_hs_labels(a1);
+    svg_update(a1);                                            // SV グラフ(hs)
     if (a1 == gModEd || a1 == gTipEd) mod_update(a1);          // プラグインの描画物 / ShowTip
 }
 typedef void (*tbars_fn)(void *, int);

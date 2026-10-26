@@ -1735,6 +1735,64 @@ static void lasso_select(void *ed) {
     ed_toast_text(ed, buf, 4);
 }
 // タッチ処理(keytouch / s_touch フックから)。戻り値 YES = 消費した
+// ---- Lasso モード中の「叩いて 1 つずつ選択 / 解除」(指がほとんど動かずに離れたとき) ----
+// 標準のタッチ処理には渡さない(渡すと、グリッド固定が ON のとき、選んだノートがグリッドへ吸着してずれる)ので、自前で選択を切り替えるだけ。
+static float lasso_seg_d2(float px, float py, float ax, float ay, float bx, float by) {   // 点 p と線分 ab の距離の 2 乗
+    float dx = bx - ax, dy = by - ay, L = dx * dx + dy * dy, t = L > 0 ? ((px - ax) * dx + (py - ay) * dy) / L : 0;
+    t = t < 0 ? 0 : (t > 1 ? 1 : t);
+    float qx = ax + t * dx - px, qy = ay + t * dy - py;
+    return qx * qx + qy * qy;
+}
+static void lasso_tap(void *ed, float tx, float ty) {
+    const Lay *l = lay_of(ed);
+    uint8_t *e = (uint8_t *)ed;
+    void *cont = *(void **)(e + 1472);
+    float cx = pl_node_px(cont), cy = VT(cont, 208, float (*)(void *))(cont);
+    float K = LF(ed, l->zoom) * LF(ed, l->base);
+    float xw = l->slide ? LF(ed, 1696) : 0;
+    float R = 28;                                                  // これより近いノートだけを対象にする(Key は 1 列の幅の 6 割)
+    if (!l->slide) {
+        int cnt = e[1700]; if (cnt < 1) cnt = 1;
+        float x0 = cx + LF(ed, 1632), x1 = cx + LF(ed, 1632 + 4 * (cnt - 1)) + LF(ed, 1672);
+        R = fminf(60, fmaxf(20, 0.6f * (x1 - x0) / cnt));
+    }
+    void *best = NULL; float bd = R * R;
+    for (NSValue *sv in sel_children(ed)) {
+        void *sp = sv.pointerValue;
+        uint8_t *note = VT(sp, 704, uint8_t *(*)(void *))(sp);
+        float sx = cx + VT(sp, 192, float (*)(void *))(sp), sy = cy + VT(sp, 208, float (*)(void *))(sp);
+        float d2 = (tx - sx) * (tx - sx) + (ty - sy) * (ty - sy);
+        if (!l->slide && (note[112] & 0x80)) {                      // Key の hold: 頭から終端までの線分
+            float *sz = VT(sp, 328, float *(*)(void *))(sp);
+            float h = sz ? sz[1] : 0;
+            d2 = fminf(d2, lasso_seg_d2(tx, ty, sx, sy, sx, sy + h));
+        }
+        if (l->slide && (note[113] & 8)) {                          // Slide のパス: 各点とそれを結ぶ線分
+            double head = note_beat(note, 64, 72, 76);
+            uint8_t *b = *(uint8_t **)(note + 136), *en = *(uint8_t **)(note + 144);
+            float px = sx, py = sy; int cnt = 0;
+            for (; b != en && cnt < 6000; b += 28, cnt++) {
+                float x = cx + xw * (float)(uint8_t)(note[128] + b[24]) / 255.0f;
+                float y = cy + K * (float)(head + note_beat(b, 0, 8, 12));
+                d2 = fminf(d2, lasso_seg_d2(tx, ty, px, py, x, y));
+                px = x; py = y;
+            }
+        }
+        if (d2 < bd) { bd = d2; best = sp; }
+    }
+    if (!best) return;                                               // 何もない所を叩いても、今の選択は変えない(Lasso は足していく操作)
+    sel_snapshot_drop();
+    if (sel_has(ed, best)) {                                         // 選択中 → 解除(ほかは残す)
+        NSMutableArray *keep = [NSMutableArray array];
+        void **v = sel_vec(ed);
+        for (void **q = (void **)v[0]; q != (void **)v[1]; q++) if (*q != best) [keep addObject:[NSValue valueWithPointer:*q]];
+        sel_clear(ed);
+        for (NSValue *k in keep) sel_add(ed, k.pointerValue);
+    } else sel_add_f(ed, best);                                      // 未選択 → 選択
+    void **sv2 = sel_vec(ed);
+    char buf[48]; snprintf(buf, sizeof buf, "Selected %ld", (long)((void **)sv2[1] - (void **)sv2[0]));
+    ed_toast_text(ed, buf, 2);
+}
 static BOOL lasso_touch(void *ed, int ev, void *pos) {
     if (!gLasso || gPreview || !lay_of(ed)) return NO;
     if (*((uint8_t *)ed + 903) || *((uint8_t *)ed + 901)) return NO;
@@ -1764,7 +1822,11 @@ static BOOL lasso_touch(void *ed, int ev, void *pos) {
     }
     if (ev == 2) {
         gLassoActive = NO;
-        lasso_select(ed);
+        float mnx = 1e9f, mxx = -1e9f, mny = 1e9f, mxy = -1e9f;     // 指の動きの幅(ほとんど動いていなければ「叩き」)
+        const float *gp = gLassoPts.bytes; size_t gn = gLassoPts.length / 8;
+        for (size_t i = 0; i < gn; i++) { mnx = fminf(mnx, gp[2 * i]); mxx = fmaxf(mxx, gp[2 * i]); mny = fminf(mny, gp[2 * i + 1]); mxy = fmaxf(mxy, gp[2 * i + 1]); }
+        if (gn && fmaxf(mxx - mnx, mxy - mny) < 12.0f) lasso_tap(ed, gp[0], gp[1]);
+        else lasso_select(ed);
         lasso_redraw(ed, NO);
         gLassoPts = nil;
     } else if (ev == 6) {
@@ -1952,6 +2014,7 @@ static void info_pick(void *ed, int k) {
 #include "plugins.inc"
 #include "undo.inc"
 #include "osu.inc"
+#include "sharelink.inc"
 #if !defined(BM_PUBLIC) && __has_include("mpshare.inc")   // 非公開の実験コード(公開リポジトリには含めない)
 #define BM_MPSHARE 1
 #include "mpshare.inc"
@@ -4045,9 +4108,39 @@ static void seg_pick_nearest(void *ed, void *spr, const void *pos) {
     }
     if (best >= 0) { os_log(L, "seg-hit: stock idx=%d nearest=%d d=%.1f", *(int *)(pp + 696), best, bd); *(int *)(pp + 696) = best; }
 }
+// ---- Slide: Grid align が ON のとき、選択したノートの指離しで、選択中の全ノートが 1 つずつグリッドへ丸められる(標準の動作)のを直す ----
+// 標準(sub_1000C7224 の ev=2)は、指を離すたびに、選択中の各ノートの横位置(note[128])を個別にグリッドへ丸める。動かしていない(叩いただけ)ときも。
+// そのため、曲線状に並べたノートが、離した瞬間に近いグリッド線へ吸着して、複数の直線のようになってしまう(Undo で戻る)。
+// 直し: 複数選択のときは Grid align を使わない(自由に動かす)。1 つだけのときは、動かしたときだけ丸める(叩いただけなら丸めない)。
+//       標準の処理の間だけ Grid align(editor+1732)を 0 にして丸めを止め、終わったら戻す。
+static NSMutableDictionary *gMvStart;   // 触り始め(ev=0)の、選択中の各ノートの横位置
+static void mv_capture(void *a1) {
+    gMvStart = [NSMutableDictionary dictionary];
+    void **v = sel_vec(a1);
+    for (void **p = (void **)v[0]; p != (void **)v[1]; p++) {
+        uint8_t *n = VT(*p, 704, uint8_t *(*)(void *))(*p);
+        if (n) gMvStart[[NSValue valueWithPointer:*p]] = @(n[128]);
+    }
+}
+static BOOL mv_skip_align(void *a1, void *a3) {   // YES = 標準の処理の間だけ Grid align を止める
+    uint8_t *e = (uint8_t *)a1;
+    int tool = *(int *)(e + 1368);
+    if (!e[1732] || e[903] || e[901] || tool == 83 || tool == 84) return NO;
+    uint8_t *H = VT(a3, 704, uint8_t *(*)(void *))(a3);
+    void **v = sel_vec(a1);
+    if (!H || v[0] == v[1]) return NO;
+    if (v[1] - v[0] >= 2) return YES;                                  // 複数選択: 丸めない
+    NSNumber *sH = gMvStart[[NSValue valueWithPointer:a3]];            // 1 つだけ: 動いていなければ(叩いただけ)丸めない
+    return sH && H[128] == sH.intValue;
+}
 static intptr_t hook_s_note(void *a1, int ev, void *a3, void *pos) {   // sub_1000C7224: ノート自身へのタッチ(選択・移動)。順番に選択はここで選択が更新された後に控える
     if (ev == 0 && a3 && bm_opt(BMO_REMOVE_CUT) && slide_remove_cut(a1, a3, pos)) return 0;
+    uint8_t alignSave = 0; BOOL gg = NO;
+    if (ev == 2 && a3 && lay_of(a1) && lay_of(a1)->slide && bm_opt(BMO_GRID_GROUP) && mv_skip_align(a1, a3)) { gg = YES; alignSave = ((uint8_t *)a1)[1732]; ((uint8_t *)a1)[1732] = 0; }
     intptr_t r = orig_snote(a1, ev, a3, pos);
+    if (gg) ((uint8_t *)a1)[1732] = alignSave;
+    if (ev == 0 && a3 && lay_of(a1) && lay_of(a1)->slide) mv_capture(a1);
+    if (ev == 2) gMvStart = nil;
     if (a3 && lay_of(a1) && lay_of(a1)->slide && *(int *)((uint8_t *)a1 + 1368) == 84) {   // Slide modify(ツール 84)
         if (ev == 0 && bm_opt(BMO_SEG_HIT)) seg_pick_nearest(a1, a3, pos);
         if (ev == 2 && bm_opt(BMO_SEG_VERT)) seg_vert_commit(a1, a3, pos);
@@ -4216,6 +4309,9 @@ static intptr_t hook_addbtn(void *dlg, void *text, void *sub, long id) {
         BMStr24 t = orig_lang(gLangTable, 101);
         uint8_t empty[24] = {0};
         orig_addbtn(dlg, &t, empty, 208);
+        BMStr24 sl; memset(&sl, 0, sizeof sl);              // 「Share link」(短い文字列は std::string の内蔵形式)
+        { const char *lbl = "Share link"; sl.b[23] = (uint8_t)strlen(lbl); memcpy(sl.b, lbl, strlen(lbl)); }
+        orig_addbtn(dlg, &sl, empty, BM_SHARE_BTN_ID);
         if (t.b[23] & 0x80) {                              // 長い文字列は確保分を解放(operator delete)
             static void (*del)(void *);
             if (!del) del = (void (*)(void *))dlsym(RTLD_DEFAULT, "_ZdlPv");
@@ -4238,6 +4334,65 @@ static void hook_openpath(void *sp) {                    // nullsub_48(std::stri
     if (!isDir) p = p.stringByDeletingLastPathComponent;
     os_log(L, "openpath: %{public}@", p);
     bm_open_path(p, NULL);
+}
+
+// ---- 他のアプリ / ファイル App から「Malody で開く」(曲・スキン・音源)----
+//   元のアプリは旧式の application:handleOpenURL: だけを実装している(受け取った URL をそのまま取り込み処理へ渡し、取り込み後にそのファイルを削除する)。
+//   ところが LSSupportsOpeningDocumentsInPlace = true(ファイル App に曲フォルダを見せるのに必要)だと iOS は新式の
+//   application:openURL:options: を前提にし、無いと UIKit のアサーションで落ちる(実機で確認)。
+//   → 新式を足し、元ファイルは触らずにアプリ内の Library/Caches/bm_open へコピーしてから、元の handleOpenURL: に渡す(パスそのものの URL で)。
+static void bm_openurl_log(NSString *line) {   // 実機でうまくいかないときの手掛かり: ファイル App から Documents/openurl_log.txt を見られる
+    NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+    NSString *path = [docs stringByAppendingPathComponent:@"openurl_log.txt"];
+    os_log(L, "openurl: %{public}@", line);
+    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
+    if (!fh) { [NSFileManager.defaultManager createFileAtPath:path contents:nil attributes:nil]; fh = [NSFileHandle fileHandleForWritingAtPath:path]; }
+    [fh seekToEndOfFile];
+    [fh writeData:[[NSString stringWithFormat:@"%@ %@\n", [NSDate date], line] dataUsingEncoding:NSUTF8StringEncoding]];
+    [fh closeFile];
+}
+static BOOL bm_app_openurl(id self, SEL _cmd, id app, NSURL *url, NSDictionary *opts) {
+    NSURL *use = url;
+    if (url.isFileURL) {
+        NSFileManager *fm = NSFileManager.defaultManager;
+        BOOL sc = [url startAccessingSecurityScopedResource];
+        // コピー先は Library/Caches/bm_open(Documents/Inbox は iOS が管理していて、アプリからは新しいファイルを作れない)
+        NSString *lib = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES).firstObject;
+        NSString *stage = [lib stringByAppendingPathComponent:@"bm_open"];
+        [fm removeItemAtPath:stage error:nil];                                                    // 前回の取り残しを片付ける
+        [fm createDirectoryAtPath:stage withIntermediateDirectories:YES attributes:nil error:nil];
+        [fm createDirectoryAtPath:[[lib stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"skin"] withIntermediateDirectories:YES attributes:nil error:nil];   // スキンの置き場(Library/skin。無いと展開に失敗するので用意する)
+        NSString *dst = [stage stringByAppendingPathComponent:url.lastPathComponent];
+        NSError *er = nil, *coErr = nil;
+        __block BOOL copied = NO;
+        __block NSError *cerr = nil;
+        // ファイル App / iCloud などのファイルは、ファイル調整(NSFileCoordinator)を通して読むのが確実
+        NSFileCoordinator *fc = [[NSFileCoordinator alloc] initWithFilePresenter:nil];
+        [fc coordinateReadingItemAtURL:url options:NSFileCoordinatorReadingWithoutChanges error:&coErr byAccessor:^(NSURL *u) {
+            copied = [fm copyItemAtURL:u toURL:[NSURL fileURLWithPath:dst] error:&cerr];
+        }];
+        if (!copied) { er = cerr ?: coErr; copied = [fm copyItemAtPath:url.path toPath:dst error:&er]; }   // 調整できなければ直接
+        bm_openurl_log([NSString stringWithFormat:@"open %@ scoped=%d copied=%d%@", url.absoluteString, sc, copied, copied ? @"" : [NSString stringWithFormat:@" err=%@", er.localizedDescription]]);
+        if (copied) {
+            // 元の取り込みは absoluteString を調べ、"file:///private" で始まる場合だけ取り除いてパスにする(それ以外はそのまま使う)。
+            // どの環境でも確実に通るよう、スキーム無しのパスそのもの(相対 URL)で渡す(元の処理は %エスケープを戻してから使う)
+            NSURL *pathUrl = [NSURL URLWithString:[dst stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLPathAllowedCharacterSet]];
+            use = pathUrl ?: [NSURL fileURLWithPath:dst];
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 8 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{   // 取り込み後も残っていれば、取り込めなかった合図
+                bm_openurl_log([NSString stringWithFormat:@"after 8s: %@ %@", dst.lastPathComponent, [fm fileExistsAtPath:dst] ? @"STILL THERE (import did not consume it)" : @"consumed"]);
+            });
+        } else {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ share_toast([NSString stringWithFormat:@"Open: could not read the file (%@)", er.localizedDescription ?: @"unknown"], 6000); });
+        }
+        if (sc) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 120 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ [url stopAccessingSecurityScopedResource]; });   // コピーできなかったときも取り込みが遅れて元を読むので、しばらく開けておく
+    }
+    return ((BOOL (*)(id, SEL, id, id))objc_msgSend)(self, @selector(application:handleOpenURL:), app, use);
+}
+static void bm_openurl_install(void) {
+    Class c = NSClassFromString(@"AppController");
+    if (!c) { os_log(L, "openurl: AppController not found"); return; }
+    BOOL ok = class_addMethod(c, @selector(application:openURL:options:), (IMP)bm_app_openurl, "B@:@@@");
+    os_log(L, "openurl: application:openURL:options: added=%d", ok);
 }
 
 // ---- アプリ内の Web 表示(WebviewHandle の UIWebView)を、既定のブラウザで開く ----
@@ -4338,9 +4493,11 @@ __attribute__((constructor)) static void bm_init(void) {
     orig_store = (store_fn)VA(0x100005440ULL); slots[47] = (void *)hook_store;                      // store(cave 0x100005430 + 16): osu! ストア選択時は中継サーバーへ
     orig_storetouch = (storetouch_fn)VA(0x100005458ULL); slots[48] = (void *)hook_storetouch;       // storetouch(cave 0x100005448 + 16): ストア画面の切替ボタン
 #ifdef BM_MPSHARE
-    orig_tcprecv = (tcprecv_fn)VA(0x100005470ULL); slots[49] = (void *)hook_tcprecv;                // tcprecv(cave 0x100005460 + 16): マルチの受信フレームを記録(実験)
+    orig_tcprecv = (tcprecv_fn)VA(0x100005470ULL); slots[51] = (void *)hook_tcprecv;                // tcprecv(cave 0x100005460 + 16): マルチの受信フレームを記録(実験)
     dispatch_async(dispatch_get_main_queue(), ^{ mp_boot(); });
 #endif
+    orig_dlgbtn = (dlgbtn_fn)VA(0x100005488ULL); slots[49] = (void *)hook_dlgbtn;                  // dlgbtn(cave 0x100005478 + 16): 曲メニューのボタン処理(Share link)
+    orig_sharepres = (sharepres_fn)VA(0x1000054A0ULL); slots[50] = (void *)hook_sharepres;         // sharepres(cave 0x100005490 + 16): 書き出した .mcz の共有シート
     slots[43] = (void *)hook_notecmp;                                                              // notecmp(cave 0x1000053D0): 分数の比較を 64bit に
     orig_chit = (chit_fn)VA(0x100005428ULL); slots[46] = (void *)hook_chit;                           // chit(cave 0x100005418 + 16)
     orig_s2wipe = (s2w_fn)VA(0x1000053F8ULL); slots[44] = (void *)hook_s2wipe;                     // s2wipe(cave 0x1000053E8 + 16)
@@ -4363,6 +4520,7 @@ __attribute__((constructor)) static void bm_init(void) {
     slots[8] = (void *)hook_s_touch;
     bm_expose_files();
     bm_web_external_install();
+    bm_openurl_install();
     bm_guard_bzero();
     {
         NSInteger a = [NSUserDefaults.standardUserDefaults integerForKey:@"bm.spec.alpha"];

@@ -195,9 +195,9 @@ static NSMutableDictionary<NSString *, NSDictionary *> *osu_cid_map(void) {
     dispatch_once(&once, ^{ m = [NSMutableDictionary dictionary]; });
     return m;
 }
-// Range 付きの GET(from...to の両端を含む)。応答 URL と全体のサイズ(Content-Range)も返す
-static NSData *osu_range(NSURL *url, long long from, long long to, NSURL **finalURL, long long *total) {
-    NSMutableURLRequest *rq = [NSMutableURLRequest requestWithURL:url cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:60];
+// Range 付きの GET(from...to の両端を含む)。応答 URL と全体のサイズ(Content-Range)も返す。timeout = 応答待ちの上限(秒)
+static NSData *osu_range_to(NSURL *url, long long from, long long to, NSURL **finalURL, long long *total, int timeout) {
+    NSMutableURLRequest *rq = [NSMutableURLRequest requestWithURL:url cachePolicy:NSURLRequestReloadIgnoringLocalCacheData timeoutInterval:timeout];
     [rq setValue:[NSString stringWithFormat:@"bytes=%lld-%lld", from, to] forHTTPHeaderField:@"Range"];
     __block NSData *out = nil;
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
@@ -211,9 +211,10 @@ static NSData *osu_range(NSURL *url, long long from, long long to, NSURL **final
         }
         dispatch_semaphore_signal(sem);
     }] resume];
-    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 70 * NSEC_PER_SEC));
+    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(timeout + 10) * NSEC_PER_SEC));
     return out;
 }
+static NSData *osu_range(NSURL *url, long long from, long long to, NSURL **finalURL, long long *total) { return osu_range_to(url, from, to, finalURL, total, 60); }
 // from から len バイトを 1MB ずつ 4 本並列で取って dst へ(1 本ずつだと遅い回線で大きい音源が時間切れになる)。各チャンクは 3 回まで試す
 static BOOL osu_fetch_into(NSURL *url, long long from, long long len, unsigned char *dst) {
     __block BOOL ok = YES;
@@ -239,15 +240,32 @@ static BOOL osu_fetch_into(NSURL *url, long long from, long long len, unsigned c
 }
 // 曲(sid)の .osz の目次(末尾の中央ディレクトリだけ Range で取る)。項目 = 基本名 → { 位置, 圧縮後/展開後の大きさ, 方式, 名前長 }。曲ごとに 1 回だけ作る
 typedef struct { long long off, cs, us; int method; unsigned nl; } OsuZe;
-static NSDictionary *osu_zip_index(int sid) {
-    static NSMutableDictionary *cache; static NSObject *lock; static dispatch_once_t once;
-    dispatch_once(&once, ^{ cache = [NSMutableDictionary dictionary]; lock = [NSObject new]; });
-    @synchronized (lock) {
-        NSDictionary *c = cache[@(sid)];
-        if (c) return c;
-        NSURL *u0 = [NSURL URLWithString:[NSString stringWithFormat:@"https://dl.sayobot.cn/beatmaps/download/novideo/%d", sid]], *fu = nil;
+// ---- 取得元(ミラー)。0 = osu.direct(日本から速い。転送先は署名付きで有効 15 秒) / 1 = sayobot(遅いことがある。転送先は期限なし) ----
+// 曲ごとに 1 つのミラーで目次を作り、その曲の取り出しはそのミラーだけを使う(ミラーによって .osz のバイト列が違うことがあるので混ぜない)。失敗したら、その曲ではそのミラーを外す
+static NSString *osu_mirror_url(int mi, int sid) { return mi == 0 ? [NSString stringWithFormat:@"https://osu.direct/api/d/%d", sid] : [NSString stringWithFormat:@"https://dl.sayobot.cn/beatmaps/download/novideo/%d", sid]; }
+static NSString *osu_mirror_name(int mi) { return mi == 0 ? @"osu.direct" : @"sayobot"; }
+static NSMutableDictionary *gOsuZipCache, *gOsuBad;   // sid → 目次 / sid → 外したミラー(NSMutableSet)
+static NSObject *gOsuZipLock;
+static void osu_zip_state(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ gOsuZipCache = [NSMutableDictionary dictionary]; gOsuBad = [NSMutableDictionary dictionary]; gOsuZipLock = [NSObject new]; });
+}
+static void osu_zip_forget(int sid, int mi) {
+    osu_zip_state();
+    @synchronized (gOsuZipLock) {
+        [gOsuZipCache removeObjectForKey:@(sid)];
+        NSMutableSet *b = gOsuBad[@(sid)]; if (!b) gOsuBad[@(sid)] = b = [NSMutableSet set];
+        [b addObject:@(mi)];
+    }
+    osu_srv_log([NSString stringWithFormat:@"zip: sid %d drop mirror %@", sid, osu_mirror_name(mi)]);
+}
+// 1 つのミラーで目次(末尾の中央ディレクトリだけ Range で取る)を作る。失敗なら nil
+static NSDictionary *osu_zip_build(int sid, int mi) {
+    {
+        NSURL *u0 = [NSURL URLWithString:osu_mirror_url(mi, sid)], *fu = nil;
         long long n = 0;
-        if (!osu_range(u0, 0, 0, &fu, &n) || n < 22 || !fu) { osu_srv_log(@"zip: size probe failed"); return nil; }
+        if (!osu_range_to(u0, 0, 0, &fu, &n, mi == 0 ? 10 : 60) || n < 22 || !fu) { osu_srv_log([NSString stringWithFormat:@"zip: size probe failed (%@)", osu_mirror_name(mi)]); return nil; }
+        if (mi == 0) fu = u0;   // osu.direct の転送先は署名付きで 15 秒しか使えない → 入口の URL から毎回引き直す(sayobot の転送先は期限なし)
         long long tl = MIN(n, 70000LL);
         NSData *tail = osu_range(fu, n - tl, n - 1, NULL, NULL);
         const unsigned char *t = tail.bytes;
@@ -269,10 +287,25 @@ static NSDictionary *osu_zip_index(int sid) {
             p += 46 + nl + xl + cl;
             if (nm && !([nm hasSuffix:@"/"]) && (ze.method == 0 || ze.method == 8)) ents[nm.lastPathComponent] = [NSData dataWithBytes:&ze length:sizeof ze];
         }
-        c = @{ @"url": fu, @"n": @(n), @"ents": ents };
-        cache[@(sid)] = c;
-        osu_srv_log([NSString stringWithFormat:@"zip: sid %d total %lld bytes, %lu entries", sid, n, (unsigned long)ents.count]);
+        NSDictionary *c = @{ @"url": fu, @"n": @(n), @"ents": ents, @"mirror": @(mi) };
+        osu_srv_log([NSString stringWithFormat:@"zip: sid %d via %@ total %lld bytes, %lu entries", sid, osu_mirror_name(mi), n, (unsigned long)ents.count]);
         return c;
+    }
+}
+// 曲(sid)の .osz の目次。項目 = 基本名 → { 位置, 圧縮後/展開後の大きさ, 方式, 名前長 }。曲ごとに 1 回だけ作る。osu.direct → sayobot の順に試す
+static NSDictionary *osu_zip_index(int sid) {
+    osu_zip_state();
+    @synchronized (gOsuZipLock) {
+        NSDictionary *c = gOsuZipCache[@(sid)];
+        if (c) return c;
+        for (int mi = 0; mi < 2; mi++) {
+            if ([gOsuBad[@(sid)] containsObject:@(mi)]) continue;
+            if (mi == 0 && [NSUserDefaults.standardUserDefaults integerForKey:@"bm.osu.mirror"] == 1) continue;   // 設定: bm.osu.mirror = 1 → sayobot だけを使う(osu.direct が不調なとき用)
+            c = osu_zip_build(sid, mi);
+            if (c) { gOsuZipCache[@(sid)] = c; return c; }
+        }
+        [gOsuBad removeObjectForKey:@(sid)];   // 全部だめだったら、次の要求のときに最初から試し直せるようにする
+        return nil;
     }
 }
 static BOOL osu_send_all(int fd, const void *b, size_t len) {
@@ -282,8 +315,9 @@ static BOOL osu_send_all(int fd, const void *b, size_t len) {
 }
 // .osz の 1 項目を、取れた分から順にそのまま(圧縮なら伸ばして)送る。応答ヘッダは先に出す(Content-Length は目次の展開後サイズ)ので、遅い回線でも
 // クライアントには少しずつ届き続け、待たされて時間切れになりにくい。取得は 512KB ずつ 4 本先読み
-static BOOL osu_stream_entry(int fd, int sid, NSString *name, NSString *suffix) {
+static BOOL osu_stream_entry2(int fd, int sid, NSString *name, NSString *suffix, int attempt) {   // attempt 0 = 最初 / 1 = ミラーを替えた再試行
     NSDictionary *idx = osu_zip_index(sid);
+    int mirror = [idx[@"mirror"] intValue];
     NSDictionary *ents = idx[@"ents"];
     NSData *zd = name ? ents[name] : nil;
     if (!zd && suffix) for (NSString *k in ents) if ([k hasSuffix:suffix]) { zd = ents[k]; break; }
@@ -291,7 +325,11 @@ static BOOL osu_stream_entry(int fd, int sid, NSString *name, NSString *suffix) 
     OsuZe ze; memcpy(&ze, zd.bytes, sizeof ze);
     NSURL *fu = idx[@"url"]; long long n = [idx[@"n"] longLongValue];
     NSData *lh = osu_range(fu, ze.off, MIN(ze.off + 30 + ze.nl + 1024, n) - 1, NULL, NULL);
-    if (!lh || lh.length < 30 || *(uint32_t *)lh.bytes != 0x04034b50) { osu_srv_log(@"stream: bad local header"); return NO; }
+    if (!lh || lh.length < 30 || *(uint32_t *)lh.bytes != 0x04034b50) {   // 応答ヘッダを出す前の失敗 → このミラーを外して、もう一方で 1 度だけやり直す
+        osu_srv_log([NSString stringWithFormat:@"stream: bad local header (%@)", osu_mirror_name(mirror)]);
+        osu_zip_forget(sid, mirror);
+        return attempt == 0 ? osu_stream_entry2(fd, sid, name, suffix, 1) : NO;
+    }
     long long data = ze.off + 30 + *(uint16_t *)((const char *)lh.bytes + 26) + *(uint16_t *)((const char *)lh.bytes + 28);
     NSString *head = [NSString stringWithFormat:@"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: %lld\r\nConnection: close\r\n\r\n", ze.us];
     if (!osu_send_all(fd, head.UTF8String, head.length)) return NO;
@@ -301,6 +339,7 @@ static BOOL osu_stream_entry(int fd, int sid, NSString *name, NSString *suffix) 
     for (long long i = 0; i < nch; i++) { [got addObject:(NSData *)NSNull.null]; [sems addObject:dispatch_semaphore_create(0)]; }
     dispatch_semaphore_t window = dispatch_semaphore_create(4);
     __block BOOL abort_ = NO;
+    BOOL netfail = NO;
     [NSThread detachNewThreadWithBlock:^{   // 先読み(順番に 4 本まで)
         for (long long i = 0; i < nch && !abort_; i++) {
             dispatch_semaphore_wait(window, DISPATCH_TIME_FOREVER);
@@ -322,7 +361,7 @@ static BOOL osu_stream_entry(int fd, int sid, NSString *name, NSString *suffix) 
     for (long long i = 0; i < nch && ok; i++) {
         dispatch_semaphore_wait(sems[(NSUInteger)i], DISPATCH_TIME_FOREVER);
         NSData *d; @synchronized (got) { d = got[(NSUInteger)i]; }
-        if ((id)d == NSNull.null) { ok = NO; break; }
+        if ((id)d == NSNull.null) { ok = NO; netfail = YES; break; }   // 取れなかった(通信の失敗)
         if (!infl) { ok = osu_send_all(fd, d.bytes, d.length); sent += d.length; }
         else {
             zs.next_in = (Bytef *)d.bytes; zs.avail_in = (uInt)d.length;
@@ -343,8 +382,10 @@ static BOOL osu_stream_entry(int fd, int sid, NSString *name, NSString *suffix) 
     if (infl) inflateEnd(&zs);
     free(ob);
     osu_srv_log([NSString stringWithFormat:@"stream: sid %d %@ sent %lld/%lld ok=%d", sid, name ?: suffix, sent, ze.us, ok]);
+    if (!ok && netfail) osu_zip_forget(sid, mirror);   // 通信が続かなかった → 次の要求では別のミラーで目次から作り直す
     return ok && sent == ze.us;
 }
+static BOOL osu_stream_entry(int fd, int sid, NSString *name, NSString *suffix) { return osu_stream_entry2(fd, sid, name, suffix, 0); }
 static NSString *osu_md5(NSData *d) {
     unsigned char h[CC_MD5_DIGEST_LENGTH]; CC_MD5(d.bytes, (CC_LONG)d.length, h);
     NSMutableString *r = [NSMutableString string];
@@ -413,8 +454,13 @@ static NSData *osu_srv_reply(NSString *path, NSDictionary<NSString *, NSString *
         obj = files.count ? @{ @"code": @0, @"data": @{ @"sid": @(dsid), @"cid": @(cid.intValue), @"uid": @1, @"dsid": @(dsid), @"list": files } } : @{ @"code": @-1 };
     } else if ([path hasPrefix:@"/osu/cover/"] || [path hasPrefix:@"/osu/preview/"]) {   // 画像 / 試聴
         BOOL cv = [path hasPrefix:@"/osu/cover/"];
-        NSString *sid = path.lastPathComponent;
+        NSString *last = path.lastPathComponent;
+        NSUInteger kk = 0;
+        while (kk < last.length && [last characterAtIndex:kk] >= '0' && [last characterAtIndex:kk] <= '9') kk++;
+        NSString *sid = [last substringToIndex:kk];            // クライアントが付ける末尾("!small" や拡張子)は無視して曲 ID だけにする
+        if (!sid.length) return [NSData data];
         NSData *d = osu_srv_fetch(cv ? [NSString stringWithFormat:@"https://assets.ppy.sh/beatmaps/%@/covers/list@2x.jpg", sid] : [NSString stringWithFormat:@"https://b.ppy.sh/preview/%@.mp3", sid], 15);
+        if (!d.length && cv) d = osu_srv_fetch([NSString stringWithFormat:@"https://cdn.sayobot.cn:25225/beatmaps/%@/covers/cover.jpg", sid], 15);   // osu! 公式の画像が取れない / 無いときは sayobot の画像
         if (ctype) *ctype = cv ? @"image/jpeg" : @"audio/mpeg";
         return d ?: [NSData data];
     }

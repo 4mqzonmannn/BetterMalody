@@ -6,13 +6,14 @@ typedef struct { const char *key, *title; BOOL on; } BmOpt;
 #else
 #define BMO_DEF(v) v
 #endif
-enum { BMO_REMOVE_CUT, BMO_S2W, BMO_SEG_ANY, BMO_SEG_VERT, BMO_SEG_HIT, BMO_COUNT };
+enum { BMO_REMOVE_CUT, BMO_S2W, BMO_SEG_ANY, BMO_SEG_VERT, BMO_SEG_HIT, BMO_GRID_GROUP, BMO_COUNT };
 static BmOpt gBmOpts[BMO_COUNT] = {
     { "bm.opt.remove_cut", "Slide Remove tool: cut after touched point", YES },   // 公開版も既定 ON(v1.0.5 から。issue #9 の修正)。保存済みの値があればそちら
     { "bm.opt.s2w", "Slide to Wipe: keep start and seg positions", BMO_DEF(YES) },
     { "bm.opt.seg_any", "Allow segs not in time order (tap before end adds a seg)", BMO_DEF(YES) },
     { "bm.opt.seg_vert", "Slide modify: drag a seg vertically (beat)", BMO_DEF(YES) },
     { "bm.opt.seg_hit", "Slide modify: pick the seg nearest to the touch", BMO_DEF(YES) },
+    { "bm.opt.grid_group", "Slide grid align: no snapping while several notes are selected (or on a plain tap)", YES },   // 公開版も既定 ON(issue #17/#18 の修正)。保存済みの値があればそちら
 };
 static BOOL bm_opt(int i) {
     static BOOL loaded;

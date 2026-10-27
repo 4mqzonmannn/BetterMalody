@@ -57,6 +57,7 @@ typedef intptr_t (*modbuild_fn)(void *);
 static modbuild_fn orig_modbuild;
 static intptr_t hook_modbuild(void *scene) {
     intptr_t r = orig_modbuild(scene);
+    ns_modbuild_post(scene);                                           // 速さの文字を小数で(notespeed.inc)
     memset(&gTurbo, 0, sizeof gTurbo);
     gTurbo.scene = scene;
     int cnt = 0;
@@ -96,7 +97,7 @@ static intptr_t hook_modsel(void *scene, unsigned ev, void *node) {   // sub_100
 // ---- (S) 音楽速度 / (P) 一時停止の無効 ----
 // 再生開始 sub_10007D658(a1=再生管理: a1+712 = プレイ設定(+4 = モッド), a1+704 = 音楽チャンネル, a1+808 = 既定の再生速度(float), a1+880 = 状態 / 8 = 一時停止中)。
 // DASH(0x10)/RUSH(0x20)/SLOW(0x100)は a1+808 を 1.2 / 1.5 / 0.8 に上書きして sub_1001F5A84(音楽チャンネル, 速度)へ渡す。それ以外は a1+808 をそのまま使うので、ここを差し替える。
-// ノーツの流れる速さ(Key の a1+1236)は、DASH 等では 1/速度 に合わせている(見た目の速さを保つ)。同じ扱いにする。
+// ノーツの流れる速さ(Key の a1+1236)は、DASH 等では 1/速度 に合わせている(見た目の速さを保つ)。Turbo でも同じ補正を入れて、実時間の流れる速さを一定にする(補正は 1 回分だけ。turbo_scroll_comp)。
 #define TURBO_SPEED_MODS (0x10 | 0x20 | 0x100)
 typedef intptr_t (*playstart_fn)(void *, float);
 static playstart_fn orig_playstart;
@@ -119,6 +120,16 @@ static intptr_t hook_playstart(void *a1, float a2) {
     }
     return orig_playstart(a1, a2);
 }
+// 流れる速さの補正(1/速度)。準備(vtable の関数)は同じ画面で複数回呼ばれうるので、「掛ける」と呼ぶたびに累積して遅くなる。
+// 補正前の値を画面ごとに控え、毎回「補正前の値 × 100/速度」を書く(idx 0 = Key / 1 = Slide)。
+static void *gScrollScene[2]; static float gScrollBase[2], gScrollApplied[2];
+static void turbo_scroll_comp(int idx, void *a1, int off, int mods) {
+    float *f = (float *)((uint8_t *)a1 + off), cur = *f;
+    float base = (gScrollScene[idx] == a1 && cur == gScrollApplied[idx]) ? gScrollBase[idx] : cur;
+    *f = base * 100.0f / gTurboSpd;
+    gScrollScene[idx] = a1; gScrollBase[idx] = base; gScrollApplied[idx] = *f;
+    os_log(L, "turbo: scroll factor[%d] %.3f -> %.3f (base %.3f, mods=0x%x)", idx, cur, *f, base, mods);
+}
 typedef intptr_t (*prepkey_fn)(void *, void *);
 static prepkey_fn orig_prepkey;
 static intptr_t hook_prepkey(void *a1, void *chart) {
@@ -129,11 +140,7 @@ static intptr_t hook_prepkey(void *a1, void *chart) {
     intptr_t r = orig_prepkey(a1, chart);
     if (ovr) *(int *)(sets + 4) = saved;
     if (a1) kp_apply_windows(a1);
-    if (r && ovr && gTurboSpd != 100) {
-        float before = *(float *)((uint8_t *)a1 + 1236);
-        *(float *)((uint8_t *)a1 + 1236) *= 100.0f / gTurboSpd;
-        os_log(L, "turbo: key scroll factor %.3f -> %.3f (mods=0x%x)", before, *(float *)((uint8_t *)a1 + 1236), saved);
-    }
+    if (r && ovr && gTurboSpd != 100) turbo_scroll_comp(0, a1, 1236, saved);
     return r;
 }
 typedef intptr_t (*pausetgl_fn)(void *);
@@ -176,6 +183,12 @@ static intptr_t hook_localrec(void *mgr, void *hash, int mode, void *rec) {
 // 譜面名(sub_1001B5638: x0=譜面, x8=結果の std::string)。読み込み画面 sub_10007206C(0x10007257C に戻る)とリザルト sub_100034EF8(0x100035774 に戻る)からの呼び出しだけ、
 // Turbo の音楽速度を末尾に付ける(" 1.2x")。曲選択など他の呼び出しは触らない。x8 の戻り値は 24B 構造体の返却として受ける(std::string は再配置可能)。
 typedef struct { uint64_t w[3]; } Str24;
+// 読み込み画面 sub_10007206C は、次のプレイ情報(v6: [0] = 譜面, +8 = モッド)を sub_1001EA438 で取り出す。その戻り値を控え、譜面名の速度表示は実際のモッドで決める
+// (gTurboOn は MOD 画面を経ずに解除されたときなどに古いままになり、解除後も「2x」が残った)
+typedef void *(*playinfo_fn)(void *);
+static playinfo_fn orig_playinfo;
+static void *gPendingPlay;
+static void *hook_playinfo(void *mgr) { void *r = orig_playinfo(mgr); gPendingPlay = r; return r; }
 typedef Str24 (*diffname_fn)(void *);
 static diffname_fn orig_diffname;
 static Str24 hook_diffname(void *chart) {
@@ -183,7 +196,7 @@ static Str24 hook_diffname(void *chart) {
     Str24 r = orig_diffname(chart);
     int spd = 100;
     if (ret == (void *)VA(0x100035774ULL)) spd = gPlaySpd;
-    else if (ret == (void *)VA(0x10007257CULL)) spd = gTurboOn ? gTurboSpd : 100;
+    else if (ret == (void *)VA(0x10007257CULL)) spd = (gPendingPlay && (*(int *)((uint8_t *)gPendingPlay + 8) & 0x800)) ? gTurboSpd : 100;
     if (spd != 100) {
         char b[24]; snprintf(b, sizeof b, " %gx", spd / 100.0);
         ((void *(*)(void *, const char *))VA(0x100741D7CULL))(&r, b);   // std::string::append(const char *)
@@ -201,11 +214,7 @@ static intptr_t slide_prep(void *a1, void *a2, sprep_fn orig) {
     if (ovr) *(int *)(sets + 4) = saved & ~TURBO_SPEED_MODS;
     intptr_t r = orig(a1, a2);
     if (ovr) *(int *)(sets + 4) = saved;
-    if (r && ovr && gTurboSpd != 100) {
-        float before = *(float *)((uint8_t *)a1 + 0x5e8);
-        *(float *)((uint8_t *)a1 + 0x5e8) *= 100.0f / gTurboSpd;
-        os_log(L, "turbo: slide scroll factor %.3f -> %.3f (mods=0x%x)", before, *(float *)((uint8_t *)a1 + 0x5e8), saved);
-    }
+    if (r && ovr && gTurboSpd != 100) turbo_scroll_comp(1, a1, 0x5e8, saved);
     return r;
 }
 static intptr_t hook_sprep1(void *a1, void *a2) { return slide_prep(a1, a2, orig_sprep1); }

@@ -16,6 +16,29 @@
 #define CFG_TAG_OSU    100   // 「osu! Store」ボタン(設定画面の最下段)
 #define CFG_TAG_OPTS   101   // 「Editor options」ボタン
 
+// ---- ノーツスピード(ツリー): 見出しの行(開閉)+ モードごとの行(-0.1 / -0.01 / 値(手入力)/ +0.01 / +0.1)。値の実体は notespeed.inc ----
+#define CFG_TAG_NSHEAD   102   // 見出しの開閉ボタン
+#define CFG_TAG_NSHEADT  103   // その文字(Show... / Hide)
+#define CFG_TAG_NSBTN0   200   // 200 + 10×行 + j(0 = -0.1 / 1 = -0.01 / 2 = 値の当たり判定(手入力)/ 3 = +0.01 / 4 = +0.1)
+#define CFG_TAG_NSROW0   270   // 行の入れ物(開閉で表示を切り替える)
+#define CFG_TAG_NSVAL0   280   // 値の文字
+#define NS_ROWS 3
+static const struct { int slot; const char *name; } NS_ROW[NS_ROWS] = { { 0, "Key" }, { 1, "Taiko" }, { 4, "Slide" } };   // 設定の枠 → モード(実機のログで確認済み)
+static BOOL gNsOpen;
+static struct { void *row[NS_ROWS], *val[NS_ROWS], *headt, *list; } gNsUI;
+
+// ---- Offset / Hitposition(ツリー): 見出しの開閉 + モードごとのゲージ(Master と同じ操作)。値の実体は modeoffset.inc ----
+//   g = 0 Offset(判定)/ 1 Hitposition(表示)。番号 k = 10g + i(i = OF_ROW の添字)
+#define CFG_TAG_OFHEAD0  104   // 見出しの開閉ボタン(104 + 4g)/ その文字(105 + 4g)
+#define CFG_TAG_OFROW0   300   // 行の入れ物(300 + k)/ 当たり判定 320 + k / バー 340 + k / 値の文字 360 + k
+#define CFG_TAG_OFBG0    320
+#define CFG_TAG_OFBAR0   340
+#define CFG_TAG_OFVAL0   360
+static BOOL gOfOpen[2];
+static void *gOfStockBg[2];   // 元の Hit offset / Graphic offset のスライダーの背景(tag 13 / 15)。ゲージに置き換えたので隠す
+static struct { void *row[20], *bar[20], *val[20], *headt[2]; } gOfUI;
+static void *gWalkStack[16];
+
 static int gMasterVol = 100;
 static struct { void *scene, *mbar, *mlbl, *panel, *title, *tb; int target; } gCfg;
 
@@ -29,7 +52,22 @@ static int cfg_tag(void *n) { return ((int (*)(void *))(*(void ***)n)[0x2a0 / 8]
 static void cfg_walk(void *n, int depth, int *count) {
     if (!n || depth > 10 || *count > 4000) return;
     (*count)++;
+    if (depth < 16) gWalkStack[depth] = n;
     int t = cfg_tag(n);
+    if (t >= CFG_TAG_NSROW0 && t < CFG_TAG_NSROW0 + NS_ROWS && !gNsUI.row[t - CFG_TAG_NSROW0]) {
+        gNsUI.row[t - CFG_TAG_NSROW0] = n;
+        if (!gNsUI.list) for (int d = (depth < 16 ? depth : 16) - 1; d >= 0; d--) if (cast_to(gWalkStack[d], 0x1008EADF0ULL)) { gNsUI.list = gWalkStack[d]; break; }   // 祖先の ListSprite
+    }
+    else if (t >= CFG_TAG_NSVAL0 && t < CFG_TAG_NSVAL0 + NS_ROWS && !gNsUI.val[t - CFG_TAG_NSVAL0]) gNsUI.val[t - CFG_TAG_NSVAL0] = n;
+    else if (t == CFG_TAG_NSHEADT && !gNsUI.headt) gNsUI.headt = n;
+    else if ((t == 13 || t == 15) && !gOfStockBg[t == 15]) gOfStockBg[t == 15] = n;
+    else if (t >= CFG_TAG_OFROW0 && t < CFG_TAG_OFROW0 + 20 && t % 10 < OF_N) {            // Offset / Hitposition の行(一覧の祖先も控える)
+        if (!gOfUI.row[t - CFG_TAG_OFROW0]) gOfUI.row[t - CFG_TAG_OFROW0] = n;
+        if (!gNsUI.list) for (int d = (depth < 16 ? depth : 16) - 1; d >= 0; d--) if (cast_to(gWalkStack[d], 0x1008EADF0ULL)) { gNsUI.list = gWalkStack[d]; break; }
+    }
+    else if (t >= CFG_TAG_OFBAR0 && t < CFG_TAG_OFBAR0 + 20 && t % 10 < OF_N) { if (!gOfUI.bar[t - CFG_TAG_OFBAR0]) gOfUI.bar[t - CFG_TAG_OFBAR0] = n; }
+    else if (t >= CFG_TAG_OFVAL0 && t < CFG_TAG_OFVAL0 + 20 && t % 10 < OF_N) { if (!gOfUI.val[t - CFG_TAG_OFVAL0]) gOfUI.val[t - CFG_TAG_OFVAL0] = n; }
+    else if ((t == CFG_TAG_OFHEAD0 + 1 || t == CFG_TAG_OFHEAD0 + 5) && !gOfUI.headt[(t - CFG_TAG_OFHEAD0) / 4]) gOfUI.headt[(t - CFG_TAG_OFHEAD0) / 4] = n;
     if (t == CFG_TAG_MBAR && !gCfg.mbar) gCfg.mbar = n;
     else if (t == CFG_TAG_MLBL && !gCfg.mlbl) gCfg.mlbl = n;
     else if (t == CFG_TAG_PANEL && !gCfg.panel) gCfg.panel = n;           // 暗幕の子も 99 だが、親(パネル全体)が先に見つかる
@@ -95,6 +133,51 @@ static void cfg_set(int t, int v) {
     if (t == 0 || t == 5) cfg_apply_music();
 }
 
+static void of_ui_show(int g, int i) {   // 1 行のバーと値の文字(標準のスライダーと同じ: バー = (値 + 200) × 0.25 %)
+    int k = 10 * g + i, v = of_get(g, i);
+    float pct = cfg_pct(2, v < -200 ? -200 : (v > 200 ? 200 : v));
+    if (gOfUI.bar[k]) ((void (*)(void *, float))VA(0x100166D10ULL))(gOfUI.bar[k], pct);
+    if (gOfUI.val[k]) { char b[16]; snprintf(b, sizeof b, "%d", v); set_label_text(gOfUI.val[k], b); }
+}
+static void of_ui_update(void) {   // 行の表示 / 見出しの文字 / 各ゲージの値(並べ直しは呼び出し側)
+    for (int g = 0; g < 2; g++) {
+        for (int i = 0; i < OF_N; i++) {
+            void *row = gOfUI.row[10 * g + i];
+            if (row) VT(row, 336, void (*)(void *, int))(row, gOfOpen[g] ? 1 : 0);
+            of_ui_show(g, i);
+        }
+        if (gOfUI.headt[g]) set_label_text(gOfUI.headt[g], gOfOpen[g] ? "Hide" : "Show...");
+    }
+}
+static void ns_ui_refresh(BOOL relayout, BOOL keepScroll) {   // 値の文字 / 行の表示 / 見出しの文字を更新し、必要なら一覧を並べ直す(Offset / Hitposition も含む)
+    of_ui_update();
+    for (int i = 0; i < NS_ROWS; i++) {
+        if (gNsUI.row[i]) VT(gNsUI.row[i], 336, void (*)(void *, int))(gNsUI.row[i], gNsOpen ? 1 : 0);
+        if (gNsUI.val[i]) { char b[16]; snprintf(b, sizeof b, "%.2f", ns_fine(NS_ROW[i].slot)); set_label_text(gNsUI.val[i], b); }
+    }
+    if (gNsUI.headt) set_label_text(gNsUI.headt, gNsOpen ? "Hide" : "Show...");
+    if (relayout && gNsUI.list) {                                              // 表示中の行だけを積み直す
+        uint8_t *ls = gNsUI.list;
+        void *box = *(void **)(ls + 1560);                                     // 中身の入れ物。その y = 画面の動き(viewH - 中身の高さ = 先頭 / 0 = 末尾)
+        float viewH = *(float *)(ls + 128), y0 = box ? VT(box, 208, float (*)(void *))(box) : 0;
+        double c0 = *(double *)(ls + 1568);
+        ((void (*)(void *, char))VA(0x100048FF8ULL))(ls, keepScroll ? 1 : 0);   // 標準の並べ直しは、スクロールを末尾へ戻してしまう
+        if (keepScroll && box) {                                               // 先頭からの距離を保つ: 並べ直しの後の y を計算して、標準のスクロール更新(sub_100048594)に渡す
+            float y1 = (float)((double)y0 + c0 - viewH) + viewH - (float)*(double *)(ls + 1568);
+            float lo = viewH - (float)*(double *)(ls + 1568);
+            if (y1 < lo) y1 = lo;
+            if (y1 > 0) y1 = 0;
+            *(float *)(ls + 1460) = y1;
+            ((void (*)(void *))VA(0x100048594ULL))(ls);
+        }
+    }
+}
+static void ns_ui_set(int i, float v) {
+    ns_store(NS_ROW[i].slot, v);
+    if (gCfg.scene) *((uint8_t *)gCfg.scene + 680) = 1;                       // 変更あり(標準のトグルと同じ印)
+    ns_ui_refresh(NO, YES);
+}
+
 static void cfg_panel(BOOL show) {
     if (!gCfg.panel) return;
     if (!show && gCfg.tb) ((void (*)(void *))VA(0x10006D2E0ULL))(gCfg.tb);   // 入力中なら確定して編集状態を終える
@@ -103,6 +186,15 @@ static void cfg_panel(BOOL show) {
 static void cfg_open_input(int t) {
     if (!gCfg.panel || !gCfg.tb) return;
     gCfg.target = t;
+    if (t >= 100) {                                                            // ノーツスピード(100 + 行): 小数で入力
+        char ttl[48]; snprintf(ttl, sizeof ttl, "%s note speed (-20 to 20)", NS_ROW[t - 100].name);
+        if (gCfg.title) set_label_text(gCfg.title, ttl);
+        ((void (*)(void *))VA(0x10006D2E0ULL))(gCfg.tb);
+        tb_set(gCfg.tb, [NSString stringWithFormat:@"%.2f", ns_fine(NS_ROW[t - 100].slot)]);
+        cfg_panel(YES);
+        ((void (*)(void *))VA(0x10006DA24ULL))(gCfg.tb);
+        return;
+    }
     if (gCfg.title) set_label_text(gCfg.title, CFG_NAME[t]);
     ((void (*)(void *))VA(0x10006D2E0ULL))(gCfg.tb);
     tb_set(gCfg.tb, [NSString stringWithFormat:@"%d", cfg_get(t)]);
@@ -115,9 +207,18 @@ static cfgbuild_fn orig_cfgbuild;
 static intptr_t hook_cfgbuild(void *scene) {   // sub_1000174F8: 画面の構築後に追加ノードを結び付ける
     intptr_t r = orig_cfgbuild(scene);
     memset(&gCfg, 0, sizeof gCfg);
+    memset(&gNsUI, 0, sizeof gNsUI); gNsOpen = NO;
+    memset(&gOfUI, 0, sizeof gOfUI); gOfOpen[0] = gOfOpen[1] = NO; memset(gOfStockBg, 0, sizeof gOfStockBg);
     gCfg.scene = scene;
     int cnt = 0;
     cfg_walk(scene, 0, &cnt);
+    for (int t = 2; t <= 3; t++) {                                             // 元の Hit offset / Graphic offset のスライダー(背景 / バー / 値の文字)を隠す(スキンの show=0 は効かない)
+        void **b = cfg_vec(scene, 880), **l = cfg_vec(scene, 904);
+        if (gOfStockBg[t - 2]) VT(gOfStockBg[t - 2], 336, void (*)(void *, int))(gOfStockBg[t - 2], 0);
+        if (b && b[t]) VT(b[t], 336, void (*)(void *, int))(b[t], 0);
+        if (l && l[t]) VT(l[t], 336, void (*)(void *, int))(l[t], 0);
+    }
+    ns_ui_refresh(YES, NO);                                                    // 既定は閉じた状態(行を隠して並べ直す)
     if (gCfg.mbar) cfg_show(5, gMasterVol);
     if (gCfg.panel) VT(gCfg.panel, 336, void (*)(void *, int))(gCfg.panel, 0);
     os_log(L, "settings: bound mbar=%p mlbl=%p panel=%p tb=%p (visited %d)", gCfg.mbar, gCfg.mlbl, gCfg.panel, gCfg.tb, cnt);
@@ -141,6 +242,48 @@ static intptr_t hook_cfgtouch(void *scene, int ev, void *node, float *pos) {   /
             if ((ev == 3 || ev == 2) && now - last > 1.0) { last = now; dispatch_async(dispatch_get_main_queue(), ^{ bm_opts_menu(); }); }
             return orig_cfgtouch(scene, ev, node, pos);
         }
+        if (tag == 13 || tag == 15) return 1;                                 // 元の Hit offset / Graphic offset のスライダー(隠してある)は、ゲージに置き換えたので捨てる
+        if (tag == CFG_TAG_OFHEAD0 || tag == CFG_TAG_OFHEAD0 + 4) {           // Offset / Hitposition の開閉(クリック 1 回につき 1 度)
+            static CFAbsoluteTime last;
+            CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+            if ((ev == 3 || ev == 2) && now - last > 0.3) {
+                last = now; int g = (tag - CFG_TAG_OFHEAD0) / 4; gOfOpen[g] = !gOfOpen[g]; ns_ui_refresh(YES, YES);
+            }
+            return orig_cfgtouch(scene, ev, node, pos);                       // ボタンの押下表示は標準の処理に任せる
+        }
+        if (tag >= CFG_TAG_OFBG0 && tag < CFG_TAG_OFBG0 + 20 && tag % 10 < OF_N) {   // モードごとのゲージ(スワイプ)
+            int k = tag - CFG_TAG_OFBG0, g = k / 10, i = k % 10;
+            BOOL panelOn = gCfg.panel && VT(gCfg.panel, 344, int (*)(void *))(gCfg.panel);
+            if (ev <= 1 && gOfOpen[g] && !panelOn && gOfUI.bar[k] && pos) {
+                ((void (*)(void *, const float *))VA(0x100166E3CULL))(gOfUI.bar[k], pos);
+                int v = (int)llroundf(*(float *)((uint8_t *)gOfUI.bar[k] + 1012) * 4.0f - 200.0f);   // バーの % → ms(標準の逆: (v + 200) × 0.25)
+                v = v < -200 ? -200 : (v > 200 ? 200 : v);
+                if (v != of_get(g, i)) { of_set(g, i, v); of_ui_show(g, i); }
+            }
+            return 1;
+        }
+        if (tag == CFG_TAG_NSHEAD) {                                          // Note speed の開閉(クリック 1 回につき 1 度)
+            static CFAbsoluteTime last;
+            CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+            if ((ev == 3 || ev == 2) && now - last > 0.3) {
+                last = now; gNsOpen = !gNsOpen; ns_ui_refresh(YES, YES);
+            }
+            return orig_cfgtouch(scene, ev, node, pos);                       // ボタンの押下表示は標準の処理に任せる
+        }
+        if (tag >= CFG_TAG_NSBTN0 && tag < CFG_TAG_NSBTN0 + 10 * NS_ROWS) {   // Note speed の行(閉じている間は何もしない)
+            int i = (tag - CFG_TAG_NSBTN0) / 10, j = (tag - CFG_TAG_NSBTN0) % 10;
+            BOOL panelOn = gCfg.panel && VT(gCfg.panel, 344, int (*)(void *))(gCfg.panel);
+            if (!gNsOpen || panelOn) return 1;
+            if (j == 2) { if (ev == 0) cfg_open_input(100 + i); return 1; }   // 値 → 手入力
+            static CFAbsoluteTime last;
+            CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+            if ((ev == 3 || ev == 2) && now - last > 0.12) {
+                last = now;
+                static const float STEP[5] = { -0.1f, -0.01f, 0, 0.01f, 0.1f };
+                ns_ui_set(i, ns_fine(NS_ROW[i].slot) + STEP[j]);
+            }
+            return orig_cfgtouch(scene, ev, node, pos);
+        }
         if (tag >= CFG_TAG_HIT0 && tag <= CFG_TAG_PANEL) {
             BOOL panelOn = gCfg.panel && VT(gCfg.panel, 344, int (*)(void *))(gCfg.panel);
             if (panelOn) os_log(L, "settings touch: ev=%d tag=%d node=%p", ev, tag, node);   // 診断: 入力パネルが開いている間のタッチ
@@ -156,8 +299,13 @@ static intptr_t hook_cfgtouch(void *scene, int ev, void *node, float *pos) {   /
                 if (ev == 0) {
                     NSString *s = tb_text(gCfg.tb);
                     NSScanner *sc = [NSScanner scannerWithString:s];
-                    int v;
-                    if ([sc scanInt:&v]) cfg_set(gCfg.target, v);
+                    if (gCfg.target >= 100) {                                 // ノーツスピード: 小数
+                        float fv;
+                        if ([sc scanFloat:&fv]) ns_ui_set(gCfg.target - 100, fv);
+                    } else {
+                        int v;
+                        if ([sc scanInt:&v]) cfg_set(gCfg.target, v);
+                    }
                     cfg_panel(NO);
                 }
             } else if (tag == CFG_TAG_CANCEL) {

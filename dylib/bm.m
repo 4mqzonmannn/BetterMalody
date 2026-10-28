@@ -3395,6 +3395,12 @@ static void svg_update(void *ed) {
     static BOOL loaded;
     if (!loaded) { loaded = YES; gSvgOn = [NSUserDefaults.standardUserDefaults boolForKey:@"bm.svg.on"]; }
     if (gSvgEditor != ed) { gSvgEditor = ed; gSvgHolder = NULL; gSvgTiles = [NSMutableDictionary dictionary]; gSvgHash = 0; }
+    if (gSvgHolder) {   // エディタを閉じて開き直すと、同じアドレスに別のエディタが作られうる。入れ物がこのエディタの子で無ければ、古い(解放済みの)入れ物なので捨てる
+        nvec *kids = node_children(ed);
+        BOOL alive = NO;
+        if (kids) for (void **p = kids->begin; p != kids->end; p++) if (*p == gSvgHolder) { alive = YES; break; }
+        if (!alive) { gSvgHolder = NULL; gSvgTiles = [NSMutableDictionary dictionary]; gSvgHash = 0; }
+    }
     if (!gSvgOn) { if (gSvgTiles.count) svg_hide_all(); return; }
     void *outer = *(void **)((uint8_t *)ed + 0x2d8);
     if (!outer) return;
@@ -3591,13 +3597,22 @@ static void hook_refresh_inner(void *a1, float dt) {   // sub_1001B0AF0 = 毎フ
     }
     orig_refresh(a1, dt);
 }
-// ---- ズームの上限を広げる(+5 段階): 標準の + ボタンが上限で止まったら、こちらで同じ比率だけ拡大を続ける ----
-// 標準の段階は layout 側の表で決まる(上限 16 段)。ボタンのタグ(6 / 7)の押下の直後にズーム関数が呼ばれるので、そこで要求値を差し替える。縮小は足した分を先に戻す
-#define ZM_EXTRA_MAX 5
+// ---- ズームの上限を広げる: 標準の + ボタンが上限で止まったら、こちらで拡大を続ける ----
+// 標準の段階は layout 側の表で決まる(0.5〜2.5 を 0.1 刻み)。ボタンのタグ(6 / 7)の押下の直後にズーム関数が呼ばれるので、そこで要求値を差し替える。縮小は足した分を先に戻す
+// 最初の ZM_EXTRA_LIN 段は標準と同じ幅(+0.1 ずつ)、その先は 1 段ごとに同じ倍率(ZM_GEO)で拡大する。
+// 最大 = 標準の上限 + 0.5 の ZM_GEO^ZM_EXTRA_GEO 倍 = 4 倍(1/128 の間隔が、これまでの最大ズームの 1/32 の間隔と同じ長さになる)
+#define ZM_EXTRA_LIN 5
+#define ZM_EXTRA_GEO 10
+#define ZM_GEO 1.148698f                                  // 4^(1/10)
+#define ZM_EXTRA_MAX (ZM_EXTRA_LIN + ZM_EXTRA_GEO)
 static int gZmExtra, gZmTag;
 static float gZmLimit, gZmStep = 0.1f;                    // 上限に当たったときの標準の値 / 標準の 1 段の幅
 static CFAbsoluteTime gZmTagT;
-// 拡大 = タグ 6 / 縮小 = タグ 7。標準は上限で値を変えない(要求値 = 上限)。上限に当たったら、標準と同じ幅で最大 ZM_EXTRA_MAX 段、要求値を差し替えて拡大を続ける。
+static float zm_extra_val(int n) {                        // 上限から n 段先の値
+    if (n <= ZM_EXTRA_LIN) return gZmLimit + gZmStep * n;
+    return (gZmLimit + gZmStep * ZM_EXTRA_LIN) * powf(ZM_GEO, (float)(n - ZM_EXTRA_LIN));
+}
+// 拡大 = タグ 6 / 縮小 = タグ 7。標準は上限で値を変えない(要求値 = 上限)。上限に当たったら、最大 ZM_EXTRA_MAX 段、要求値を差し替えて拡大を続ける。
 // 縮小は足した分を先に戻す(標準は縮小で 1 段下がった値を要求してくるので、標準側の値を上限に戻す)
 static float zm_filter(void *ed, float z) {
     const Lay *l = lay_of(ed);
@@ -3610,14 +3625,14 @@ static float zm_filter(void *ed, float z) {
         if (gZmExtra == 0 && fabsf(z - z0) > 1e-6f * z0) return z;                                       // 想定外
         if (gZmExtra == 0) gZmLimit = z;                                                               // 上限に当たった
         if (gZmExtra < ZM_EXTRA_MAX) gZmExtra++;
-        os_log(L, "zoom: extra %d -> %.4f", gZmExtra, gZmLimit + gZmStep * gZmExtra);
-        return gZmLimit + gZmStep * gZmExtra;
+        os_log(L, "zoom: extra %d -> %.4f", gZmExtra, zm_extra_val(gZmExtra));
+        return zm_extra_val(gZmExtra);
     }
     if (gZmTag == 7 && gZmExtra > 0) {
         gZmExtra--;
         *(float *)(lo + 1444) = gZmLimit;                              // 標準側は上限のまま保つ(次の縮小・拡大の基準)
-        os_log(L, "zoom: extra %d -> %.4f", gZmExtra, gZmLimit + gZmStep * gZmExtra);
-        return gZmLimit + gZmStep * gZmExtra;
+        os_log(L, "zoom: extra %d -> %.4f", gZmExtra, zm_extra_val(gZmExtra));
+        return zm_extra_val(gZmExtra);
     }
     gZmExtra = 0;
     return z;
@@ -3733,6 +3748,50 @@ static void ord_unsel(void *ed, void *sp) {         // 標準の選択解除(sub
 static float gOrdMinD; static int gOrdNSlides; static double gOrdTb, gOrdU, gOrdC, gOrdW, gOrdHx, gOrdSx;
 static void *ord_hit_slide_tol(void *ed, const void *pos, double tolB, double tolX);
 static void *ord_hit_slide(void *ed, const void *pos) { return ord_hit_slide_tol(ed, pos, 0.06, 6.0); }
+#define SL_HIT_MINW 16.0                         // エディタで細いスライドを選ぶときの当たり判定の最小幅(ノート幅と同じ 0〜255 の値)
+#define SL_PLACE_MINW 1.0                        // エディタで置けるノートの最小幅(標準は 25)
+// 置く幅の見本(editor+1656: +8 = 見本のノード / +16 = 最大 / +20 = 最小の幅(px))。標準の最小は 25/255 なので、1/255 まで下げて幅 1 を置けるようにする
+static void slide_place_minw(void *ed) {
+    float xw = LF(ed, 1696);
+    if (xw > 0) *(float *)((uint8_t *)ed + 1676) = xw * (float)SL_PLACE_MINW / 255.0f;
+}
+// 幅の見本(Scale3Sprite: 左 +640 / 右 +648 / 中央 +656 の 3 枚)は、幅が左右の部品の合計より小さいと、右の部品(= 幅を決める端)が左へ食い込む(標準の配置 sub_1000AA668)。
+// 対策: ①小さいときは左と中央を隠し、右の部品を幅に合わせて縮める ②右端に縦線を引いて、幅の位置をくっきり見せる(線は見本の子ノード。格子と同じ線描画 sub_10054B054)。
+// 配置は描画時に 1 回だけ行われる(+620 が立っている間)ので、先に自分で行ってから直す
+#define GH_LINE_TAG 0x4D4231
+static void slide_ghost_fit(void *ed) {
+    static BOOL squeezed, hidden;                  // squeezed = 右の部品を縮めた状態 / hidden = 左と中央を隠した状態(配置し直しても表示は戻らないので別に持つ)
+    uint8_t *g = *(uint8_t **)((uint8_t *)ed + 1664);
+    if (!g) return;
+    void *L = *(void **)(g + 640), *R = *(void **)(g + 648), *M = *(void **)(g + 656);
+    if (!L || !R || !M || *(int *)(g + 624) != 0) return;
+    if (g[620]) { ((void (*)(void *))VA(0x1000AA668ULL))(g); g[620] = 0; squeezed = NO; }
+    float w = *(float *)(g + 124);
+    float cl = VT(L, 328, float *(*)(void *))(L)[0], cr = VT(R, 328, float *(*)(void *))(R)[0];
+    if (cl <= 0 || cr <= 0 || w <= 0) return;
+    if (w >= cl + cr) {
+        if (squeezed) { ((void (*)(void *))VA(0x1000AA668ULL))(g); squeezed = NO; }
+        if (hidden) { VT(L, 336, void (*)(void *, int))(L, 1); VT(M, 336, void (*)(void *, int))(M, 1); hidden = NO; }
+    } else {
+        float k = w / cr, p0[2] = { 0, 0 };
+        VT(L, 336, void (*)(void *, int))(L, 0); VT(M, 336, void (*)(void *, int))(M, 0);
+        VT(R, 64, void (*)(void *, float))(R, k); VT(R, 136, void (*)(void *, float *))(R, p0);
+        squeezed = hidden = YES;
+    }
+    // 右端の縦線(幅の位置)。右の部品の子にして、部品といっしょに動かす(描画のたびの更新とのずれを避ける)。子ノードから印のついた線ノードを探し、無ければ作って 1 回だけ描く
+    void *ln = NULL;
+    nvec *ch = node_children(R);
+    if (ch) for (void **p = ch->begin; p != ch->end; p++) if (*(int *)((uint8_t *)*p + 492) == GH_LINE_TAG) { ln = *p; break; }
+    if (ln) return;
+    ln = ((void *(*)(void))VA(0x10054B054ULL))();
+    if (!ln) return;
+    *(int *)((uint8_t *)ln + 492) = GH_LINE_TAG;
+    VT(R, 504, void (*)(void *, void *, int))(R, ln, 100);
+    float hr = VT(R, 328, float *(*)(void *))(R)[1];
+    float col[4], a[2] = { cr - 1.0f, 0 }, b[2] = { cr - 1.0f, hr };
+    ((void (*)(float *, float, float, float, float))VA(0x100554790ULL))(col, 1.0f, 0.25f, 0.25f, 1.0f);
+    ((void (*)(void *, float *, float *, float *))VA(0x10054BD64ULL))(ln, a, b, col);
+}
 static void *ord_hit_slide_tol(void *ed, const void *pos, double tolB, double tolX) {
     typedef struct { float v[2]; uint64_t pad[2]; } V2Ret;
     uint8_t *e = (uint8_t *)ed;
@@ -3766,7 +3825,7 @@ static void *ord_hit_slide_tol(void *ed, const void *pos, double tolB, double to
         }
         if (!found) off = px;
         double center = n[128] + off, w = n[129];                                  // +128 は中心 x(標準の配置は、幅の半分で端に収めた中心を入れる)/ +129 は幅
-        double d = fabs(u - center) - w / 2; if (d < 0) d = 0;
+        double d = fabs(u - center) - fmax(w, SL_HIT_MINW) / 2; if (d < 0) d = 0;   // 細いスライド(幅 1 など)も、当たり判定は最低 SL_HIT_MINW(0〜255 の値)
         if (d < gOrdMinD) { gOrdMinD = (float)d; gOrdC = center; gOrdW = w; gOrdHx = n[128]; gOrdSx = cnt ? (double)seg_x16(sb + 28 * (cnt - 1)) : 0; }
         if (d > tolX) continue;                                                    // 幅の外(余裕 tolX / 255)
         double score = fabs(u - center);
@@ -4194,7 +4253,7 @@ static void slide_grid_keep(void *ed) {
     }
     if (g[0] != sv[0] || g[1] != sv[1]) { sv[0] = g[0]; sv[1] = g[1]; have = YES; os_log(L, "grid: saved align=%d lines=%d", sv[0], sv[1]); }
 }
-static void hook_s_refresh(void *a1, float dt) { hook_s_refresh_inner(a1, dt); if (lay_of(a1)) { kb_tick(a1); ovl_update(a1); spec_update(a1); svg_update(a1); mod_update(a1); un_tick(a1); slide_grid_keep(a1); pl_right_tick(a1); more_sync(a1); { static int f; if ((++f % 10) == 0 && (gOrdNotes.count || gOrdTinted.count)) ord_tint_sync(a1); } } }
+static void hook_s_refresh(void *a1, float dt) { hook_s_refresh_inner(a1, dt); if (lay_of(a1)) { slide_place_minw(a1); slide_ghost_fit(a1); kb_tick(a1); ovl_update(a1); spec_update(a1); svg_update(a1); mod_update(a1); un_tick(a1); slide_grid_keep(a1); pl_right_tick(a1); more_sync(a1); { static int f; if ((++f % 10) == 0 && (gOrdNotes.count || gOrdTinted.count)) ord_tint_sync(a1); } } }
 static void hook_s_refresh_inner(void *a1, float dt) {   // sub_1000C5408 = EditorSlide update
     if (gPreview) {
         static int cnt; static double lastPos = -1e9;
@@ -4211,8 +4270,24 @@ static void hook_s_refresh_inner(void *a1, float dt) {   // sub_1000C5408 = Edit
     }
     orig_s_refresh(a1, dt);
 }
+// Slide の格子(sub_1000C63E8)は、縦線(幅の分割)を「1 拍の高さ × 拍数 N(editor+1728、初期化で 3×画面高さ / 1 拍の高さ)」の長さで 1 本の線として描く。
+// ズームを大きくすると線の長さが画面の数十倍(数万 px)になり、GPU の描画範囲を超えて縦線が消えるため、ズームに応じて N を減らして長さを一定(画面高さの約 3 倍)に保つ。
+// 格子のノードは拍の整数倍の位置に置かれる(sub_1000C5498)ので、N を減らしても画面を覆える
+static void slide_grid_n(void *ed, float z) {
+    uint8_t *e = (uint8_t *)ed;
+    float H = LF(ed, 128), unit = LF(ed, 1720);
+    if (H <= 0 || unit <= 0 || z <= 0) return;
+    long n0 = (long)ceil((double)H * 3.0 / (double)unit);                    // 標準の N(初期化と同じ式)
+    long n = n0;
+    if (z > 1.0f) { long m = (long)ceil((double)H * 3.0 / ((double)unit * (double)z)) + 2; if (m < n) n = m; }
+    if (n < 3) n = 3;
+    if (n > 255) n = 255;
+    e[1728] = (uint8_t)n;
+}
 static intptr_t hook_s_zoom(void *a1, float z) {   // sub_1000C5AB0
-    intptr_t r = orig_s_zoom(a1, zm_filter(a1, z));
+    float zr = zm_filter(a1, z);
+    if (lay_of(a1)) slide_grid_n(a1, zr);
+    intptr_t r = orig_s_zoom(a1, zr);
     if (gPreview && a1 == gEditor) ed_relayout(a1);
     return r;
 }

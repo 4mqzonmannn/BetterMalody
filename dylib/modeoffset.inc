@@ -49,8 +49,13 @@ static void of_set(int g, int i, int v) {
 
 typedef intptr_t (*playinit_fn)(void *);
 static playinit_fn orig_playinit;
+static BOOL edmod_play_begin(int *saved);   // edmod.inc: エディタのテストプレイで選んだモッドを sess[0] へ(初期化の前)
+static void edmod_play_end(int saved);
 static intptr_t hook_playinit(void *scene) {   // sub_10007D18C: プレイの画面の初期化の後で、判定 / 表示のオフセットをモードごとの値にする
+    int edSaved = 0;
+    BOOL ed = edmod_play_begin(&edSaved);
     intptr_t r = orig_playinit(scene);
+    if (ed) edmod_play_end(edSaved);
     uint8_t *sess = *(uint8_t **)((uint8_t *)scene + 712);
     uint8_t *chart = sess ? *(uint8_t **)(sess + 8) : NULL;
     if (!chart) return r;

@@ -2026,6 +2026,7 @@ static void info_pick(void *ed, int k) {
 #include "settings.inc"
 #include "gameplay.inc"
 #include "turbo.inc"
+#include "edmod.inc"
 #include "taiko.inc"
 // More(…)ボタンの強調: Lasso / Order(More の中のツール)が有効な間は、ノーツ配置系ツールと同じ青にする。
 // ボタンの特定は「押した直後にツールメニュー(editor+1400)が開いたノード」を覚える(最初に More を開いたときに分かる)
@@ -4570,7 +4571,7 @@ __attribute__((constructor)) static void bm_init(void) {
     orig_store = (store_fn)VA(0x100005440ULL); slots[47] = (void *)hook_store;                      // store(cave 0x100005430 + 16): osu! ストア選択時は中継サーバーへ
     orig_storetouch = (storetouch_fn)VA(0x100005458ULL); slots[48] = (void *)hook_storetouch;       // storetouch(cave 0x100005448 + 16): ストア画面の切替ボタン
 #ifdef BM_MPSHARE
-    orig_tcprecv = (tcprecv_fn)VA(0x100005470ULL); slots[57] = (void *)hook_tcprecv;                // tcprecv(cave 0x100005460 + 16): マルチの受信フレームを記録(実験)
+    orig_tcprecv = (tcprecv_fn)VA(0x100005470ULL); slots[58] = (void *)hook_tcprecv;                // tcprecv(cave 0x100005460 + 16): マルチの受信フレームを記録(実験)
     dispatch_async(dispatch_get_main_queue(), ^{ mp_boot(); });
 #endif
     orig_dlgbtn = (dlgbtn_fn)VA(0x100005488ULL); slots[49] = (void *)hook_dlgbtn;                  // dlgbtn(cave 0x100005478 + 16): 曲メニューのボタン処理(Share link)
@@ -4581,6 +4582,7 @@ __attribute__((constructor)) static void bm_init(void) {
     orig_spdwin = (spdwin_fn)VA(0x100005500ULL); slots[54] = (void *)hook_spdwin;                   // spdwin(cave 0x1000054F0 + 16): 速さの小ウィンドウ
     orig_playinit = (playinit_fn)VA(0x100005518ULL); slots[55] = (void *)hook_playinit;             // playinit(cave 0x100005508 + 16): プレイの初期化の後で、モードごとのオフセットに
     orig_playinfo = (playinfo_fn)VA(0x100005530ULL); slots[56] = (void *)hook_playinfo;             // playinfo(cave 0x100005520 + 16): 読み込み画面の「次のプレイ情報」
+    orig_edplay = (edplay_fn)VA(0x100005548ULL); slots[57] = (void *)hook_edplay;                     // edplay(cave 0x100005538 + 16): エディタのテストプレイ開始の前に MOD 画面(issue #21)
     slots[43] = (void *)hook_notecmp;                                                              // notecmp(cave 0x1000053D0): 分数の比較を 64bit に
     orig_chit = (chit_fn)VA(0x100005428ULL); slots[46] = (void *)hook_chit;                           // chit(cave 0x100005418 + 16)
     orig_s2wipe = (s2w_fn)VA(0x1000053F8ULL); slots[44] = (void *)hook_s2wipe;                     // s2wipe(cave 0x1000053E8 + 16)

@@ -69,6 +69,9 @@ static intptr_t hook_modbuild(void *scene) {
 }
 typedef intptr_t (*modsel_fn)(void *, unsigned, void *);
 static modsel_fn orig_modsel;
+typedef struct { uint8_t *ms; int mods, speed; void *chart; void *ed; } EdModBack;   // edmod.inc: エディタのテストプレイの MOD 画面
+static BOOL edmod_before_back(void *layer, unsigned ev, void *node, EdModBack *bk);
+static void edmod_after_back(EdModBack *bk);
 static intptr_t hook_modsel(void *scene, unsigned ev, void *node) {   // sub_1000B0078
     if (node && scene == gTurbo.scene) {
         int tag = cfg_tag(node);
@@ -85,7 +88,9 @@ static intptr_t hook_modsel(void *scene, unsigned ev, void *node) {   // sub_100
             return 1;                                   // 背景(暗幕)も含めて下へ通さない
         }
     }
+    EdModBack edBack; BOOL edClose = edmod_before_back(scene, ev, node, &edBack);
     intptr_t r = orig_modsel(scene, ev, node);
+    if (edClose) { edmod_after_back(&edBack); return r; }
     if (scene == gTurbo.scene) {
         turbo_refresh(scene);
         static int n;

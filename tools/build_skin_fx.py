@@ -164,9 +164,24 @@ _fxlist
 _fxtext-2
     text=Beat
     pos={up_x}+30,240
-_fxtext-3
+_fxbeat
+    type=4
+    tex=g-dialogbtn.png
+    tex2=g-dialogbtn2.png
+    part=7,46
+    parent=_fxpanel
+    anchor=6
+    size=150,40
+    pos={up_x}+200,230
+    etag=104
+    tag=318
+_fxicon-3
+    type=1
+    fsize=24
+    anchor=4
+    pos=75,20
+    parent=_fxbeat
     text=1:1/4
-    pos={up_x}+200,240
 _fxtext-4
     text=Type
     pos={up_x}+30,185
@@ -251,8 +266,12 @@ _fxlist
     size={listW},250
 _fxtext-2
     pos={up_x}+30,330
-_fxtext-3
-    pos={up_x}+240,330
+_fxbeat
+    size=230,60
+    pos={up_x}+240,315
+_fxicon-3
+    fsize=35
+    pos=115,30
 _fxtext-4
     pos={up_x}+30,255
 _fxtext-5

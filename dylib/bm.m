@@ -796,7 +796,7 @@ static void alert(NSString *t, NSString *m) {
 static void set_label_text(void *label, const char *txt);
 // ---- Effect パネル(既存の BPM リスト _bpmpanel を再現) ----
 // スキンの _fxpanel/_fxlist/_fxet-1..4 をUI初期化フックで結び付け、行生成/選択/追加/削除は sub_1000775DC / sub_100074B08 と同じ作り。
-static struct { void *panel, *list, *beatLbl, *kindLbl, *tb[4]; void *editor; int sel; int kind; } gFx;   // kind: 0=scroll 1=hs 2=jump 3=sign
+static struct { void *panel, *list, *beatLbl, *kindLbl, *tb[4]; void *editor; int sel; int kind; BOOL ovOn; int ovM, ovNum, ovDen; } gFx;   // ovOn = Beat ボタンで入力した拍(#24)を使う   // kind: 0=scroll 1=hs 2=jump 3=sign
 static const char *const FX_KIND_NAME[4] = { "Scroll", "HS", "Jump(ms)", "Sign" };
 static const int FX_FLAG[4] = { 32, 48, 88, 64 }, FX_VAL[4] = { 40, 56, 96, 72 };
 static void *cast_to(void *p, uintptr_t typeinfoVA) {
@@ -831,7 +831,7 @@ static void fx_bind(void *self, void *layout) {
     gFx.panel = fx_find(layout, "_fxpanel");
     void *l = fx_find(layout, "_fxlist");
     gFx.list = cast_to(l, 0x1008EADF0ULL);                 // ListSprite
-    gFx.beatLbl = fx_find(layout, "_fxtext-3");
+    gFx.beatLbl = fx_find(layout, "_fxicon-3");   // Beat ボタン(_fxbeat, tag 318)の文字
     gFx.kindLbl = fx_find(layout, "_fxicon-4");
     gFx.tb[0] = cast_to(fx_find(layout, "_fxet-1"), 0x1008F0B00ULL);   // Textbox(値の入力欄は1つ)
     gFx.editor = self;
@@ -856,6 +856,7 @@ static void fx_set_kind(int k) {
 }
 static void fx_update_beat_label(void) {
     BeatV b;
+    if (gFx.ovOn && gFx.beatLbl) { set_label_text(gFx.beatLbl, [NSString stringWithFormat:@"%d:%d/%d", gFx.ovM + 1, gFx.ovNum, gFx.ovDen].UTF8String); return; }
     if (gFx.beatLbl && cur_beat(&b))
         set_label_text(gFx.beatLbl, [NSString stringWithFormat:@"%d:%d/%d", b.m + 1, b.num, b.den].UTF8String);
 }
@@ -884,6 +885,7 @@ static void fx_row_click(void *ed, void *a2, void *row) {   // sub_100074B08 相
     intptr_t ud = (intptr_t)VT(row, 704, void *(*)(void *))(row);
     int idx = (int)ud - 1;
     gFx.sel = (gFx.sel == idx) ? -1 : idx;
+    gFx.ovOn = NO;
     fx_highlight();
     fx_fill_inputs();
 }
@@ -949,7 +951,7 @@ static void fx_open(void *self) {
     gEditor = self; gOuter = *(void **)((uint8_t *)self + 0x2d8); gFx.editor = self;
     if (!work_load()) { alert(@"Effects", @"effect store layout mismatch"); return; }
     if (!gFxClickRegistered) { fx_register_click(); gFxClickRegistered = YES; }
-    gFx.sel = -1;
+    gFx.sel = -1; gFx.ovOn = NO;
     fx_refresh_list();
     fx_fill_inputs();
     // BPMリストの表示処理(sub_1000775DC の show 側)と同じ: スライドイン + 操作フラグ
@@ -983,10 +985,23 @@ static void fx_apply(void) {   // 「Apply」: 選択行の現在の種類を更
     NSMutableData *buf = [NSMutableData dataWithLength:EFF_SZ];
     uint8_t *tmp = buf.mutableBytes;
     int found = -1;
-    if (gFx.sel >= 0 && gFx.sel < (int)eff_count()) { memcpy(tmp, eff_at(gFx.sel), EFF_SZ); found = gFx.sel; }
-    else {
+    int moveFrom = -1;                       // Beat ボタンで別の拍を入れたとき、選択行をその拍へ移す(#24)
+    if (gFx.sel >= 0 && gFx.sel < (int)eff_count()) {
+        memcpy(tmp, eff_at(gFx.sel), EFF_SZ); found = gFx.sel;
+        if (gFx.ovOn) {
+            BeatV ob = { gFx.ovM, gFx.ovNum, gFx.ovDen };
+            uint8_t chk[EFF_SZ]; memcpy(chk, tmp, EFF_SZ); beat_set(chk, ob);
+            if (fabs(beat_key(chk) - beat_key(tmp)) > 1e-9) { beat_set(tmp, ob); moveFrom = gFx.sel; found = -1; }
+        }
+    }
+    if (moveFrom >= 0) {                      // 移動先に同じ拍の要素があれば、その要素を使う(下の統合と同じ)
+        double key = beat_key(tmp);
+        for (size_t i = 0; i < eff_count(); i++) if ((int)i != moveFrom && fabs(beat_key(eff_at(i)) - key) < 1e-9) { found = (int)i; break; }
+    }
+    else if (found < 0) {
         BeatV cb;
-        if (!cur_beat(&cb)) { alert(@"Effects", @"position not available"); return; }
+        if (gFx.ovOn) cb = (BeatV){ gFx.ovM, gFx.ovNum, gFx.ovDen };
+        else if (!cur_beat(&cb)) { alert(@"Effects", @"position not available"); return; }
         eff_init(tmp); beat_set(tmp, cb);
         double key = beat_key(tmp);
         for (size_t i = 0; i < eff_count(); i++) if (fabs(beat_key(eff_at(i)) - key) < 1e-9) { found = (int)i; memcpy(tmp, eff_at(i), EFF_SZ); break; }
@@ -994,6 +1009,8 @@ static void fx_apply(void) {   // 「Apply」: 選択行の現在の種類を更
     set_opt(tmp, FX_FLAG[gFx.kind], FX_VAL[gFx.kind], tb_text(gFx.tb[0]));   // 空欄なら未設定
     double key2 = beat_key(tmp);
     BOOL any = fx_first_kind(tmp) >= 0;
+    if (moveFrom >= 0) { eff_remove(moveFrom); if (found > moveFrom) found--; }   // 移動元の行を消す
+    gFx.ovOn = NO;
     if (!any && found >= 0) eff_remove(found);              // 何も設定が残らない要素は削除
     else if (found >= 0) memcpy(eff_at(found), tmp, EFF_SZ);
     else if (any) eff_insert(tmp);
@@ -1010,6 +1027,33 @@ static void fx_remove(void) {
     gFx.sel = -1;
     fx_refresh_list();
     fx_fill_inputs();
+}
+static void pl_alert(NSString *title, NSString *msg, NSString *fieldDef, NSArray<NSString *> *titles, NSArray<NSNumber *> *styles, void (^pick)(NSInteger idx, NSString *text));   // plugins.inc
+static BOOL fx_parse_beat(NSString *t, BeatV *out) {   // 「5」「5:2/4」「5 2/4」(拍は 1 始まり、パネルの表記と同じ)
+    NSScanner *sc = [NSScanner scannerWithString:[t stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet]];
+    sc.charactersToBeSkipped = [NSCharacterSet characterSetWithCharactersInString:@": /"];
+    NSInteger m = 0, num = 0, den = 1;
+    if (![sc scanInteger:&m]) return NO;
+    if (![sc isAtEnd]) { if (![sc scanInteger:&num] || ![sc scanInteger:&den]) return NO; }
+    if (den < 1 || den > 4096 || num < 0 || m < 1 || m > 100000) return NO;
+    if (num >= den) { m += num / den; num %= den; }
+    *out = (BeatV){ (int)m - 1, (int)num, (int)den };
+    return YES;
+}
+static void fx_beat_input(void) {   // Beat ボタン: 拍を入力する(#24)。標準の Effect / BPM は「今の位置」に追加するだけだった
+    NSString *cur = gFx.ovOn ? [NSString stringWithFormat:@"%d:%d/%d", gFx.ovM + 1, gFx.ovNum, gFx.ovDen] : nil;
+    BeatV cb;
+    if (!cur && gFx.sel >= 0 && gFx.sel < (int)eff_count()) cur = fx_beat_str(eff_at(gFx.sel));
+    if (!cur && cur_beat(&cb)) cur = [NSString stringWithFormat:@"%d:%d/%d", cb.m + 1, cb.num, cb.den];
+    pl_alert(@"Beat", @"Beat position of the effect.\nFormat: 5  or  5:2/4  (beat : numerator / denominator, beats start at 1)", cur ?: @"1:0/1",
+             @[ @"OK", @"Use current position", @"Cancel" ], @[ @0, @0, @1 ], ^(NSInteger i, NSString *text) {
+        if (i == 1) { gFx.ovOn = NO; fx_update_beat_label(); return; }
+        if (i != 0) return;
+        BeatV b;
+        if (!fx_parse_beat(text ?: @"", &b)) { alert(@"Beat", @"Could not read the beat. Use e.g. 5 or 5:2/4"); return; }
+        gFx.ovOn = YES; gFx.ovM = b.m; gFx.ovNum = b.num; gFx.ovDen = b.den;
+        fx_update_beat_label();
+    });
 }
 static void fx_edit_input(void) {   // 入力欄タップ: ゲーム標準の Textbox を入力状態にする(BPM リストの入力欄と同じ)
     if (gFx.tb[0]) ((void (*)(void *))VA(0x10006DA24ULL))(gFx.tb[0]);
@@ -2691,12 +2735,13 @@ static intptr_t hook_touch(void *self, int ev, void *node, void *pos) {
             if (ev == 3) sd_close(tag == BM_TAG_SD_OK);
             return 0;
         }
-        if ((tag >= 310 && tag <= 313) || tag == 317 || tag == 38) {            // Effect パネルのボタン/入力欄
+        if ((tag >= 310 && tag <= 313) || tag == 317 || tag == 318 || tag == 38) {            // Effect パネルのボタン/入力欄
             if (ev == 3) {
                 if (tag == 310) fx_apply();
                 else if (tag == 311) fx_remove();
                 else if (tag == 312 || tag == 38) { fx_close(); pl_close(); sd_close(NO); }   // パネル外(=パネル自体)のタップで閉じる(BPMリストと同じ)
                 else if (tag == 313) fx_edit_input();
+                else if (tag == 318) fx_beat_input();
                 else if (tag == 317) {          // 種類の選択: ゲーム標準のダイアログ(Scroll / HS / Jump / Sign)
                     NSMutableArray *names = [NSMutableArray array];
                     for (int k = 0; k < 4; k++) [names addObject:[NSString stringWithFormat:@"%s%s", FX_KIND_NAME[k], k == gFx.kind ? "  *" : ""]];

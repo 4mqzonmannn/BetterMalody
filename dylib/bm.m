@@ -6,6 +6,8 @@
 #import <dlfcn.h>
 #import <os/log.h>
 #import <Accelerate/Accelerate.h>
+#import <ImageIO/ImageIO.h>
+#import <CoreGraphics/CoreGraphics.h>
 #import <mach/mach.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
@@ -1743,7 +1745,7 @@ static float lasso_seg_d2(float px, float py, float ax, float ay, float bx, floa
     float qx = ax + t * dx - px, qy = ay + t * dy - py;
     return qx * qx + qy * qy;
 }
-static void lasso_tap(void *ed, float tx, float ty) {
+static void *tap_nearest(void *ed, float tx, float ty, BOOL selOnly) {   // 叩いた位置に一番近いノートのスプライト(selOnly = 選択中のものだけ)。Lasso の叩きと、選択済みノートの再タップ解除(#23)で共用
     const Lay *l = lay_of(ed);
     uint8_t *e = (uint8_t *)ed;
     void *cont = *(void **)(e + 1472);
@@ -1759,6 +1761,7 @@ static void lasso_tap(void *ed, float tx, float ty) {
     void *best = NULL; float bd = R * R;
     for (NSValue *sv in sel_children(ed)) {
         void *sp = sv.pointerValue;
+        if (selOnly && !sel_has(ed, sp)) continue;
         uint8_t *note = VT(sp, 704, uint8_t *(*)(void *))(sp);
         float sx = cx + VT(sp, 192, float (*)(void *))(sp), sy = cy + VT(sp, 208, float (*)(void *))(sp);
         float d2 = (tx - sx) * (tx - sx) + (ty - sy) * (ty - sy);
@@ -1780,6 +1783,10 @@ static void lasso_tap(void *ed, float tx, float ty) {
         }
         if (d2 < bd) { bd = d2; best = sp; }
     }
+    return best;
+}
+static void lasso_tap(void *ed, float tx, float ty) {
+    void *best = tap_nearest(ed, tx, ty, NO);
     if (!best) return;                                               // 何もない所を叩いても、今の選択は変えない(Lasso は足していく操作)
     sel_snapshot_drop();
     if (sel_has(ed, best)) {                                         // 選択中 → 解除(ほかは残す)
@@ -3881,12 +3888,54 @@ static void ord_track(void *ed, int ev, const void *pos) {
     ord_tint_sync(ed);
     ord_marks_refresh(ed);
 }
+// ---- 選択済みのノートを、動かさずにもう一度叩くと、そのノートだけ選択から外す(#23。Lasso の叩きは lasso_tap) ----
+//   触り始め(ev 0)に「選択中のノートに当たったか」を控え、指を離した(ev 2)あと、動いていない短い叩きなら、触り始めの選択からそのノートを除いた状態に戻す
+//   (標準の処理が叩きで選択を変えても、結果が同じになるよう、選択を作り直す)。Slide はノートのスプライトへのタッチ(a3)、Key はスプライトか、近い選択中のノート
+static struct { void *ed, *hit; BOOL on, moved; float x, y; CFAbsoluteTime t; NSMutableArray *before; } gTd;
+static void td_touch(void *ed, int ev, void *a3, const void *pos) {
+    const float *pt = pos;
+    const Lay *l = lay_of(ed);
+    if (!pt || !l || !bm_opt(BMO_TAP_DESEL) || gLasso || gPreview) { if (ev == 0) gTd.on = NO; return; }
+    uint8_t *e = (uint8_t *)ed;
+    if (ev == 0) {
+        gTd.on = NO;
+        if (e[903] || e[901]) return;
+        if (l->slide && (*(int *)(e + 1368) == 83 || *(int *)(e + 1368) == 84)) return;   // Slide modify など、ノート自身を操作するツール
+        void **v = sel_vec(ed);
+        if (v[0] == v[1]) return;
+        void *hit = (a3 && sel_has(ed, a3)) ? a3 : (l->slide ? NULL : tap_nearest(ed, pt[0], pt[1], YES));
+        if (!hit) return;
+        NSMutableArray *b = [NSMutableArray array];
+        for (void **q = (void **)v[0]; q != (void **)v[1]; q++) [b addObject:[NSValue valueWithPointer:*q]];
+        gTd.ed = ed; gTd.hit = hit; gTd.on = YES; gTd.moved = NO; gTd.x = pt[0]; gTd.y = pt[1]; gTd.t = CFAbsoluteTimeGetCurrent(); gTd.before = b;
+        os_log(L, "tapdesel: begin hit=%p a3=%p selected=%lu", hit, a3, (unsigned long)b.count);
+    } else if (gTd.on && gTd.ed == ed && fabsf(pt[0] - gTd.x) + fabsf(pt[1] - gTd.y) > 12.0f) gTd.moved = YES;
+}
+static void td_finish(void *ed, int ev) {   // 標準の処理のあとに呼ぶ
+    if (!gTd.on || gTd.ed != ed) return;
+    if (ev != 2) { if (ev == 3 || ev == 6) gTd.on = NO; return; }
+    gTd.on = NO;
+    if (gTd.moved || CFAbsoluteTimeGetCurrent() - gTd.t > 0.8) return;
+    NSMutableSet *alive = [NSMutableSet set];
+    for (NSValue *sv in sel_children(ed)) [alive addObject:sv];
+    NSValue *hitV = [NSValue valueWithPointer:gTd.hit];
+    if (![alive containsObject:hitV]) return;
+    sel_snapshot_drop();
+    sel_clear(ed);
+    for (NSValue *sv in gTd.before) if (![sv isEqual:hitV] && [alive containsObject:sv]) sel_add(ed, sv.pointerValue);
+    void **sv2 = sel_vec(ed);
+    char buf[48]; snprintf(buf, sizeof buf, "Selected %ld", (long)((void **)sv2[1] - (void **)sv2[0]));
+    ed_toast_text(ed, buf, 2);
+    os_log(L, "tapdesel: deselected %p -> %s", gTd.hit, buf);
+    gTd.before = nil;
+}
 static intptr_t hook_keytouch(void *a1, int ev, void *a3, void *pos) {   // sub_1001B1804
     if (gPreview && a1 == gEditor) return 1;     // preview 中は編集操作を無効化
     if (lay_of(a1)) un_mark();
     if (pl_right_lane_map(a1, pos)) return 0;
     if (pl_touch(a1, ev, pos)) return 1;
     if (lasso_touch(a1, ev, pos)) return 1;
+    td_touch(a1, ev, a3, pos);
     pl_right_lane_unmap(pos);                // 縮んだレーンの座標戻しは自前の処理だけ。標準の処理には元の画面座標を渡す
     if (ev == 0 && lay_of(a1)) {
         void **v = sel_vec(a1);
@@ -3897,6 +3946,7 @@ static intptr_t hook_keytouch(void *a1, int ev, void *a3, void *pos) {   // sub_
         }
     }
     intptr_t r = orig_keytouch(a1, ev, a3, pos);
+    td_finish(a1, ev);
     ord_track(a1, ev, pos);
     return r;
 }
@@ -4199,7 +4249,9 @@ static intptr_t hook_s_note(void *a1, int ev, void *a3, void *pos) {   // sub_10
     if (ev == 0 && a3 && bm_opt(BMO_REMOVE_CUT) && slide_remove_cut(a1, a3, pos)) return 0;
     uint8_t alignSave = 0; BOOL gg = NO;
     if (ev == 2 && a3 && lay_of(a1) && lay_of(a1)->slide && bm_opt(BMO_GRID_GROUP) && mv_skip_align(a1, a3)) { gg = YES; alignSave = ((uint8_t *)a1)[1732]; ((uint8_t *)a1)[1732] = 0; }
+    if (a3) td_touch(a1, ev, a3, pos);
     intptr_t r = orig_snote(a1, ev, a3, pos);
+    if (a3) td_finish(a1, ev);
     if (gg) ((uint8_t *)a1)[1732] = alignSave;
     if (ev == 0 && a3 && lay_of(a1) && lay_of(a1)->slide) mv_capture(a1);
     if (ev == 2) gMvStart = nil;

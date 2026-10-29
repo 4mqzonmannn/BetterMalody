@@ -565,6 +565,25 @@ static int e_ReadBytesSelect(lua_State *L) {   // ReadBytesSelect(prompt, callba
     H->pick_bytes(gCur, id, lua_isstring(L, ARG(1)) ? lua_tostring(L, ARG(1)) : "");
     return 0;
 }
+static int e_DecodeImage(lua_State *L) {   // DecodeImage(bytes, w, h) → w*h バイトの文字列(各バイト = 明るさ 0〜255、上の行から)| nil。BM 拡張(img2hold 用)
+    size_t n = 0;
+    const char *d = NULL;
+    unsigned char *tmp = NULL;
+    if (lua_istable(L, ARG(1))) {                       // ReadBytesSelect / ReadBytes の戻り(0 始まりの配列 + Length)
+        lua_getfield(L, ARG(1), "Length"); n = (size_t)lua_tointeger(L, -1); lua_pop(L, 1);
+        if (n == 0 || n > 64u * 1024 * 1024 || !(tmp = malloc(n))) { lua_pushnil(L); return 1; }
+        for (size_t i = 0; i < n; i++) { lua_rawgeti(L, ARG(1), (lua_Integer)i); tmp[i] = (unsigned char)lua_tointeger(L, -1); lua_pop(L, 1); }
+        d = (const char *)tmp;
+    } else d = luaL_checklstring(L, ARG(1), &n);
+    int w = (int)luaL_checkinteger(L, ARG(2)), h = (int)luaL_checkinteger(L, ARG(3));
+    if (!H->img_gray || w < 1 || h < 1 || (long)w * h > 16 * 1024 * 1024) { free(tmp); lua_pushnil(L); return 1; }
+    unsigned char *g = H->img_gray(d, n, w, h);
+    free(tmp);
+    if (!g) { lua_pushnil(L); return 1; }
+    lua_pushlstring(L, (const char *)g, (size_t)w * h);
+    free(g);
+    return 1;
+}
 static int e_ReadChartCustom(lua_State *L) {
     const char *v = H->custom_get ? H->custom_get(luaL_checkstring(L, ARG(1))) : NULL;
     if (v) lua_pushstring(L, v); else lua_pushnil(L);
@@ -607,7 +626,7 @@ static const luaL_Reg kEditor[] = {
     { "AddSprite", e_AddSprite }, { "AddText", e_AddText }, { "RemoveModule", e_RemoveModule },
     { "AddSpriteUndo", e_AddSprite }, { "AddTextUndo", e_AddText }, { "RemoveModuleUndo", e_RemoveModule },
     { "FindModule", e_FindModule }, { "CallShortcut", e_CallShortcut }, { "WriteFile", e_WriteFile },
-    { "ReadFile", e_ReadFile }, { "ReadBytes", e_ReadBytes }, { "ReadBytesSelect", e_ReadBytesSelect }, { "ReadData", e_ReadData }, { "WriteData", e_WriteData },
+    { "DecodeImage", e_DecodeImage }, { "ReadFile", e_ReadFile }, { "ReadBytes", e_ReadBytes }, { "ReadBytesSelect", e_ReadBytesSelect }, { "ReadData", e_ReadData }, { "WriteData", e_WriteData },
     { "ReadChartCustom", e_ReadChartCustom }, { "WriteChartCustom", e_WriteChartCustom }, { "DoRequest", e_DoRequest },
     { "SetGridLine", e_Unsupported },
     { NULL, NULL } };

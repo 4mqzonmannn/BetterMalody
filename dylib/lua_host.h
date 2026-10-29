@@ -74,6 +74,7 @@ typedef struct {
     void   (*input)(void *sess, int id, const char *title, const char *def);   // GetUserInput: 入力待ちを登録(結果は lh_input_deliver で返す)
     int    (*order)(int *ids, int max);                  // GetOrderNotes: 「順番に選択」でタップした順のノート ID
     void   (*order_clear)(void);                        // ClearOrderNotes
+    unsigned char *(*img_gray)(const void *data, size_t n, int w, int h);   // DecodeImage: 画像を w×h の明るさ(RGB の平均、白地に合成)へ。malloc した w*h バイト(上の行から)。失敗は NULL
 } LHHost;
 
 typedef struct {

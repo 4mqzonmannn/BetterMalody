@@ -977,6 +977,34 @@ static void pl_session_begin(void *ed);
 static void pl_session_end(void *ed, int rc, const char *err, BOOL quiet);
 static void pl_request_done(LHSession *s, NSString *tag, NSString *content);
 static LHSession *gPlPickSess; static int gPlPickId;
+static unsigned char *h_img_gray(const void *data, size_t n, int w, int h) {   // ImageIO で読み、w×h へ引き伸ばして(縦横比は無視 = Web 版と同じ)白地に合成し、RGB の平均を返す
+    CFDataRef cd = CFDataCreate(NULL, data, (CFIndex)n);
+    if (!cd) return NULL;
+    CGImageSourceRef src = CGImageSourceCreateWithData(cd, NULL);
+    CFRelease(cd);
+    if (!src) return NULL;
+    CGImageRef img = CGImageSourceCreateImageAtIndex(src, 0, NULL);
+    CFRelease(src);
+    if (!img) return NULL;
+    unsigned char *rgba = calloc((size_t)w * h, 4), *out = NULL;
+    if (rgba) {
+        CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+        CGContextRef cx = CGBitmapContextCreate(rgba, w, h, 8, (size_t)w * 4, cs, (CGBitmapInfo)kCGImageAlphaPremultipliedLast);
+        CGColorSpaceRelease(cs);
+        if (cx) {
+            CGContextSetRGBFillColor(cx, 1, 1, 1, 1);
+            CGContextFillRect(cx, CGRectMake(0, 0, w, h));
+            CGContextSetInterpolationQuality(cx, kCGInterpolationHigh);
+            CGContextDrawImage(cx, CGRectMake(0, 0, w, h), img);
+            out = malloc((size_t)w * h);
+            if (out) for (long i = 0; i < (long)w * h; i++) out[i] = (unsigned char)((rgba[4 * i] + rgba[4 * i + 1] + rgba[4 * i + 2]) / 3);   // 不透明(白地に合成済み)なので、そのまま平均
+            CGContextRelease(cx);
+        }
+        free(rgba);
+    }
+    CGImageRelease(img);
+    return out;   // CGBitmapContext のメモリは下の行が先頭(上下は反転していない: データの先頭 = 画像の上)
+}
 static void h_pick_bytes(void *sess, int id, const char *prompt) {
     (void)prompt;
     gPlPickSess = sess; gPlPickId = id;
@@ -1346,7 +1374,7 @@ static const LHHost *pl_host(void) {
     h.seek_beat = h_seek_beat; h.seek_ms = h_seek_ms; h.input = h_input; h.tip = h_tip;
     h.choice = h_choice; h.slider = h_slider; h.mod_set_parent = mod_set_parent; h.log = h_log; h.custom_get = h_custom_get; h.custom_set = h_custom_set; h.request = h_request;
     h.mod_add = mod_add; h.mod_set_num = mod_set_num; h.mod_set_str = mod_set_str; h.mod_set_beat = mod_set_beat;
-    h.mod_remove = mod_remove; h.pick_bytes = h_pick_bytes; h.mod_exists = mod_exists; h.mod_get_num = mod_get_num; h.mod_set_color = mod_set_color;
+    h.mod_remove = mod_remove; h.img_gray = h_img_gray; h.pick_bytes = h_pick_bytes; h.mod_exists = mod_exists; h.mod_get_num = mod_get_num; h.mod_set_color = mod_set_color;
     h.bpm_count = h_bpm_count; h.bpm_at = h_bpm_at; h.fx_count = h_fx_count; h.fx_at = h_fx_at; h.batch = h_batch;
     return &h;
 }

@@ -108,3 +108,34 @@ static intptr_t hook_edplay(void *ed) {   // sub_100077EE0: ダイアログ(開�
     if (!gEdBypass && bm_opt(BMO_ED_MOD) && edmod_open(ed)) return 0;
     return orig_edplay(ed);
 }
+
+// ============================================================================
+// スクロール / 停止 / キー配置のスナップを、譜面先頭からの拍のグリッドに揃える(issue #27。オプション bm.opt.snap_abs、既定 ON)
+//   元の仕組み(IDA): sub_100021A0C(timeline, 丸める, ms) = 時刻 → 拍。時刻を含む BPM 区間(sub_100021820)の頭の拍に、区間の頭からの拍を 1/分割(timeline+88)へ丸めて足す。
+//     sub_1000219B0(timeline, ms) = 時刻のスナップ: 区間の頭の時刻 + 「1 拍の長さ / 分割」の倍数。
+//     どちらも「区間の頭」を起点に刻むので、BPM の変化が拍の途中(グリッド線に乗らない位置)にあると、その区間のスナップが画面のグリッド(譜面先頭からの拍)からずれる。
+//     ずれは拍の端数なので、ズームが大きいほど画面上で目立つ。
+//   ここでの変更: いったん細かく(1/288)拍にしてから、譜面先頭からの拍で 1/分割へ丸める。時刻が要るときは標準の拍 → 時刻(sub_100021B14)で戻す
+// ============================================================================
+typedef struct { int64_t mn; int32_t den; } TlBeat;     // x0 = 拍 | 分子 << 32、w1 = 分母
+typedef TlBeat (*tl2beat_fn)(void *, int, double);
+typedef double (*tlsnap_fn)(void *, double);
+static tl2beat_fn orig_tl2beat;
+static tlsnap_fn orig_tlsnap;
+static TlBeat tl_snap_abs(void *tl, double ms) {
+    TlBeat r = orig_tl2beat(tl, 0, ms);
+    int div = ((uint8_t *)tl)[88]; if (div < 1) div = 1;
+    int m = (int32_t)(uint32_t)r.mn, num = (int32_t)(r.mn >> 32), den = r.den > 0 ? r.den : 1;
+    long k = lround(((double)m + (double)num / den) * div);
+    long mm = (long)floor((double)k / div), nn = k - mm * div;
+    return (TlBeat){ (int64_t)(uint32_t)(int32_t)mm | ((int64_t)nn << 32), div };
+}
+static TlBeat hook_tl2beat(void *tl, int snap, double ms) {   // sub_100021A0C
+    if (!snap || !bm_opt(BMO_SNAP_ABS)) return orig_tl2beat(tl, snap, ms);
+    return tl_snap_abs(tl, ms);
+}
+static double hook_tlsnap(void *tl, double ms) {               // sub_1000219B0
+    if (!bm_opt(BMO_SNAP_ABS)) return orig_tlsnap(tl, ms);
+    TlBeat b = tl_snap_abs(tl, ms);
+    return ((double (*)(void *, int64_t, int32_t))VA(0x100021B14ULL))(tl, b.mn, b.den);
+}

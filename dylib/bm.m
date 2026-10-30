@@ -4698,7 +4698,7 @@ __attribute__((constructor)) static void bm_init(void) {
     orig_store = (store_fn)VA(0x100005440ULL); slots[47] = (void *)hook_store;                      // store(cave 0x100005430 + 16): osu! ストア選択時は中継サーバーへ
     orig_storetouch = (storetouch_fn)VA(0x100005458ULL); slots[48] = (void *)hook_storetouch;       // storetouch(cave 0x100005448 + 16): ストア画面の切替ボタン
 #ifdef BM_MPSHARE
-    orig_tcprecv = (tcprecv_fn)VA(0x100005470ULL); slots[58] = (void *)hook_tcprecv;                // tcprecv(cave 0x100005460 + 16): マルチの受信フレームを記録(実験)
+    orig_tcprecv = (tcprecv_fn)VA(0x100005470ULL); slots[60] = (void *)hook_tcprecv;                // tcprecv(cave 0x100005460 + 16): マルチの受信フレームを記録(実験)
     dispatch_async(dispatch_get_main_queue(), ^{ mp_boot(); });
 #endif
     orig_dlgbtn = (dlgbtn_fn)VA(0x100005488ULL); slots[49] = (void *)hook_dlgbtn;                  // dlgbtn(cave 0x100005478 + 16): 曲メニューのボタン処理(Share link)
@@ -4710,6 +4710,8 @@ __attribute__((constructor)) static void bm_init(void) {
     orig_playinit = (playinit_fn)VA(0x100005518ULL); slots[55] = (void *)hook_playinit;             // playinit(cave 0x100005508 + 16): プレイの初期化の後で、モードごとのオフセットに
     orig_playinfo = (playinfo_fn)VA(0x100005530ULL); slots[56] = (void *)hook_playinfo;             // playinfo(cave 0x100005520 + 16): 読み込み画面の「次のプレイ情報」
     orig_edplay = (edplay_fn)VA(0x100005548ULL); slots[57] = (void *)hook_edplay;                     // edplay(cave 0x100005538 + 16): エディタのテストプレイ開始の前に MOD 画面(issue #21)
+    orig_tl2beat = (tl2beat_fn)VA(0x100005560ULL); slots[58] = (void *)hook_tl2beat;               // tl2beat(cave 0x100005550 + 16): 時刻 → 拍の丸めを拍のグリッドに(#27)
+    orig_tlsnap = (tlsnap_fn)VA(0x100005578ULL); slots[59] = (void *)hook_tlsnap;                  // tlsnap(cave 0x100005568 + 16): 時刻のスナップを拍のグリッドに(#27)
     slots[43] = (void *)hook_notecmp;                                                              // notecmp(cave 0x1000053D0): 分数の比較を 64bit に
     orig_chit = (chit_fn)VA(0x100005428ULL); slots[46] = (void *)hook_chit;                           // chit(cave 0x100005418 + 16)
     orig_s2wipe = (s2w_fn)VA(0x1000053F8ULL); slots[44] = (void *)hook_s2wipe;                     // s2wipe(cave 0x1000053E8 + 16)

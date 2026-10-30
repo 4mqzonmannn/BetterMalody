@@ -3866,19 +3866,30 @@ static void *ord_hit_slide_tol(void *ed, const void *pos, double tolB, double to
         uint8_t *sb = *(uint8_t **)(n + 136), *se = *(uint8_t **)(n + 144);
         long cnt = (se - sb) / 28;
         if (cnt < 0 || cnt > 4096) continue;
-        double lastB = cnt ? head + note_beat(sb + 28 * (cnt - 1), 0, 8, 12) : head;
-        double maxB = fmax(end, lastB);
-        if (tb < head - tolB || tb > maxB + tolB) continue;                        // 時間の範囲外
+        double minB = head, maxB = fmax(end, head);                                // 時間の範囲(経路が時間を折り返す = 中継点の拍が前の点より戻る場合もあるので、全点の最小 / 最大)
+        for (long i = 0; i < cnt; i++) { double bb = head + note_beat(sb + 28 * i, 0, 8, 12); minB = fmin(minB, bb); maxB = fmax(maxB, bb); }
+        if (tb < minB - tolB || tb > maxB + tolB) continue;                        // 時間の範囲外
         gOrdNSlides++;
-        double pb = head, px = 0, off = 0; BOOL found = NO;                        // 中継点の間は中心のずれを線形に補間
-        for (long i = 0; i < cnt; i++) {
-            double bb = head + note_beat(sb + 28 * i, 0, 8, 12), xx = (double)seg_x16(sb + 28 * i);
-            if (tb <= bb) { double t = bb > pb ? (tb - pb) / (bb - pb) : 1.0; off = px + (xx - px) * t; found = YES; break; }
+        // 経路 = 始点(拍 head, ずれ 0)→ 各中継点 →(終端が最後の点より後なら)終端まで最後のずれのまま。各線分で、押した拍に重なるところの中心を線形補間し、幅の外までの距離が最小のものを採る
+        // (時間を折り返す経路では同じ拍に複数の線分が重なる。以前は「最初に拍を越えた 1 本」だけを見ていたので、最初の折り返しから先の当たり判定が消えていた)
+        double pb = head, px = 0, d = 1e9, center = n[128], w = n[129];            // +128 は中心 x(標準の配置は、幅の半分で端に収めた中心を入れる)/ +129 は幅
+        for (long i = 0; i <= cnt; i++) {
+            double bb, xx;
+            if (i < cnt) { bb = head + note_beat(sb + 28 * i, 0, 8, 12); xx = (double)seg_x16(sb + 28 * i); }
+            else { if (!(end > pb)) break; bb = end; xx = px; }
+            double lo = fmin(pb, bb), hi = fmax(pb, bb);
+            if (tb >= lo - tolB && tb <= hi + tolB) {
+                double offs[2]; int no = 0;
+                if (hi - lo > 1e-9) { double tc = fmin(fmax(tb, lo), hi); offs[no++] = px + (xx - px) * ((tc - pb) / (bb - pb)); }
+                else { offs[no++] = px; offs[no++] = xx; }                          // 同じ拍の中継点(横へ飛ぶ): 両端
+                for (int k = 0; k < no; k++) {
+                    double c = n[128] + offs[k], dd = fabs(u - c) - fmax(w, SL_HIT_MINW) / 2; if (dd < 0) dd = 0;   // 細いスライド(幅 1 など)も、当たり判定は最低 SL_HIT_MINW(0〜255 の値)
+                    if (dd < d || (dd == d && fabs(u - c) < fabs(u - center))) { d = dd; center = c; }
+                }
+            }
             pb = bb; px = xx;
         }
-        if (!found) off = px;
-        double center = n[128] + off, w = n[129];                                  // +128 は中心 x(標準の配置は、幅の半分で端に収めた中心を入れる)/ +129 は幅
-        double d = fabs(u - center) - fmax(w, SL_HIT_MINW) / 2; if (d < 0) d = 0;   // 細いスライド(幅 1 など)も、当たり判定は最低 SL_HIT_MINW(0〜255 の値)
+        if (d >= 1e9) continue;
         if (d < gOrdMinD) { gOrdMinD = (float)d; gOrdC = center; gOrdW = w; gOrdHx = n[128]; gOrdSx = cnt ? (double)seg_x16(sb + 28 * (cnt - 1)) : 0; }
         if (d > tolX) continue;                                                    // 幅の外(余裕 tolX / 255)
         double score = fabs(u - center);

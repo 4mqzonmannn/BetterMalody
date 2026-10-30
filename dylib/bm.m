@@ -3695,8 +3695,20 @@ static intptr_t hook_zoom(void *a1, float z) {  // sub_1001B10C0 (zoom 変更: �
     if (gPreview && a1 == gEditor) ed_relayout(a1);
     return r;
 }
+// 順番(gOrdNotes)のうち、もう譜面に無いノート(削除 / 作り直しで解放されたポインタ)を外す。外さないまま中身を読むと落ちる(#25 / #28)
+static void ord_prune(void *ed) {
+    if (!gOrdNotes.count || !ed || !lay_of(ed)) return;
+    NSMutableSet *live = [NSMutableSet set];
+    nvec *ch = node_children(*(void **)((uint8_t *)ed + 1472));
+    if (!ch) return;
+    for (void **p = ch->begin; p != ch->end; p++) { void *n = VT(*p, 704, void *(*)(void *))(*p); if (n) [live addObject:[NSValue valueWithPointer:n]]; }
+    NSUInteger before = gOrdNotes.count;
+    for (NSInteger i = (NSInteger)gOrdNotes.count - 1; i >= 0; i--) if (![live containsObject:gOrdNotes[(NSUInteger)i]]) [gOrdNotes removeObjectAtIndex:(NSUInteger)i];
+    if (gOrdNotes.count != before) os_log(L, "ord: pruned %lu stale notes", (unsigned long)(before - gOrdNotes.count));
+}
 // 順番の番号表示: 始点の位置に、黒丸に白い 1, 2, 3…(動画のイメージ)をモジュール(丸 = sprite / 番号 = text)で出す
 static void ord_marks_refresh(void *ed) {
+    ord_prune(ed);
     for (BMMod *m in [gMods copy]) if ([m->name hasPrefix:@"bm-ord-"]) { mod_drop_node(m); [gMods removeObject:m]; }
     if (!gOrdNotes.count || !ed || !lay_of(ed) || !lay_of(ed)->slide) return;
     void *savedEd = gPlEd;
@@ -3771,6 +3783,13 @@ static void ord_normal_reset(void *ed) {           // Order を始める時点�
     if (!ed || !lay_of(ed)) return;
     void **v = sel_vec(ed);
     for (void **p = (void **)v[0]; p != (void **)v[1]; p++) { void *n = VT(*p, 704, void *(*)(void *))(*p); if (n) [gOrdNormal addObject:[NSValue valueWithPointer:n]]; }
+}
+static void ord_after_rebuild(void *ed) {   // 取り消し / やり直しのあと(undo.inc の un_apply)。ノートは作り直されているので、色の控えは捨てて付け直す
+    gOrdTinted = [NSMutableSet set];
+    ord_prune(ed);
+    ord_tint_sync(ed);
+    ord_marks_refresh(ed);
+    if (gOrdMode && gOrdEd == ed) ord_normal_reset(ed);
 }
 static void ord_unsel(void *ed, void *sp) {         // 標準の選択解除(sub_1000C5954)と同じ手順で 1 つだけ外す: 選択から抜き、見た目(テクスチャ)を通常へ戻す
     uint8_t *e = (uint8_t *)ed;

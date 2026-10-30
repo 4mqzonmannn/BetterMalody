@@ -506,6 +506,7 @@ static void un_node_insert(void *ed, UnNode *nd, const uint8_t *src) {
     nd->shadow = note_clone(n);
     gUnNodes[un_key(n)] = nd;
 }
+static void ord_after_rebuild(void *ed);   // bm.m: 順番の色 / 番号 / 控えの選択を、作り直したノートに合わせ直す
 static void un_apply(void *ed, UnEntry *en, BOOL undo) {
     gUnBusy = YES;
     NSMutableDictionary<NSData *, NSNumber *> *selKeep = [NSMutableDictionary dictionary];   // 取り消し / やり直しで残るノートの選択を保つ(選択は履歴に入らないので、中身のキーで控えて付け直す)
@@ -521,6 +522,12 @@ static void un_apply(void *ed, UnEntry *en, BOOL undo) {
     }
     if (is_taiko(ed)) t_sel_clear(ed);
     else { sel_snapshot_drop(); sel_clear(ed); }
+    // 「順番に選択」(Order)はノートのポインタを控えている。取り消し / やり直しはノートを作り直す(ポインタが変わる)ので、UnNode で追って付け替える(#28 / #25)
+    NSMutableArray *ordNodes = nil;
+    if (gOrdNotes.count) {
+        ordNodes = [NSMutableArray array];
+        for (NSValue *v in gOrdNotes) { UnNode *nd = gUnNodes[un_key(v.pointerValue)]; [ordNodes addObject:nd ?: (id)v]; }
+    }
     NSArray<UnOp *> *ops = undo ? [[en->ops reverseObjectEnumerator] allObjects] : en->ops;
     for (UnOp *op in ops) {
         int k = op->kind;
@@ -561,6 +568,15 @@ static void un_apply(void *ed, UnEntry *en, BOOL undo) {
             sel_add(ed, sp); n++;
         }
         os_log(L, "undo: selection kept %d", n);
+    }
+    if (ordNodes) {
+        NSMutableArray<NSValue *> *re = [NSMutableArray array];
+        for (id o in ordNodes) {
+            if ([o isKindOfClass:UnNode.class]) { UnNode *nd = o; if (nd->ptr) [re addObject:[NSValue valueWithPointer:nd->ptr]]; }   // 消えたノートは順番から外す
+            else [re addObject:o];
+        }
+        [gOrdNotes setArray:re];
+        ord_after_rebuild(ed);
     }
     gUnBusy = NO;
     BOOL ok; gUnBaseCount = un_live(ed, &ok).count;

@@ -131,6 +131,8 @@ _right-tip-8
     pos=-10,174
 _right-tip-9
     pos=-10,236
+_right-icon3-[1-7]
+    pos={rightX},100%-{rightT}$-62
 _right-icon3-9
     pos={rightX},112
 _right-icon3-10
@@ -146,6 +148,7 @@ _right-tip3-12
 #   メニューは下側が空いているので、Undo / Redo を一番下の 2 段へ下げる(iPad は間隔 60 で重ならないので変えない)
 #   ツールの右バーは上 5 個(最後 = More が 370)+ 下 5 個(Divide / Speed / Undo / Redo / Plugins)で、間隔 75 だと Plugins(350)が More に重なる。
 #   スマホだけ下の並びを間隔 62(50 / 112 / 174 / 236 / 298)に詰める。メインの右バーの Speed / Undo / Redo も同じ位置にそろえる(メニューを切り替えても位置が動かない)
+#   Slide のツールは上が 6 個(Back / Note / Wipe / Slide / 削除 / More)で、間隔 75 だと More が 295 → 上の並びも間隔 62(670 … 360)に詰める
 
 # ---- Effect パネル(既存の BPM リスト _bpmpanel を複製した構造) ----
 FXPANEL = """

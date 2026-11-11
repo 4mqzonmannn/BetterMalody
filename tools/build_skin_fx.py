@@ -115,7 +115,37 @@ PHONE = """_btn-8
 _btnicon-8
     fsize=22
     pos=17,24
+_right-icon2-7
+    pos={rightX},{rightT}
+_right-icon2-8
+    pos={rightX},{rightT}+{rightP}
+_right-icon-7
+    pos={rightX},112
+_right-icon-8
+    pos={rightX},174
+_right-icon-9
+    pos={rightX},236
+_right-tip-6
+    pos=-10,112
+_right-tip-8
+    pos=-10,174
+_right-tip-9
+    pos=-10,236
+_right-icon3-9
+    pos={rightX},112
+_right-icon3-10
+    pos={rightX},174
+_right-icon3-11
+    pos={rightX},236
+_right-icon3-12
+    pos={rightX},298
+_right-tip3-12
+    pos=-10,298
 """
+# ↑ スマホ: メニューの右バーは上から 6 個(最後 = Quit が 720-50-75*5=295)並ぶので、ツールと同じ {rightT}+2P / +3P(200 / 275)だと Redo が Quit に重なる。
+#   メニューは下側が空いているので、Undo / Redo を一番下の 2 段へ下げる(iPad は間隔 60 で重ならないので変えない)
+#   ツールの右バーは上 5 個(最後 = More が 370)+ 下 5 個(Divide / Speed / Undo / Redo / Plugins)で、間隔 75 だと Plugins(350)が More に重なる。
+#   スマホだけ下の並びを間隔 62(50 / 112 / 174 / 236 / 298)に詰める。メインの右バーの Speed / Undo / Redo も同じ位置にそろえる(メニューを切り替えても位置が動かない)
 
 # ---- Effect パネル(既存の BPM リスト _bpmpanel を複製した構造) ----
 FXPANEL = """

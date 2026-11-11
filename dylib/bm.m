@@ -2150,6 +2150,7 @@ static void cat_show(void *self, int cat) {
 }
 // 「その他」メニューの BM の項目は、カテゴリ(Select / Copy / Move / Effect / Spectrogram)を押すとその場で中身が開閉する(アコーディオン)。開閉の状態は保存する(既定は Select だけ開く)
 static NSMutableArray<NSValue *> *gBmItems;                 // 自前で足した項目(作り直すときに取り除く)
+static void *gSelMenuList, *gSelLastItem;                   // 項目を足した一覧と、その最後の項目(足し済みの確認用)
 typedef struct { int tag; const char *icon, *name; const MItem *items; int n; } AccCat;
 static const AccCat kAccCats[] = {
     { BM_TAG_CAT_SELECT, "ui-edit-icon12.png", "Select", kCatSelect, (int)(sizeof kCatSelect / sizeof *kCatSelect) },
@@ -2216,10 +2217,24 @@ static void menu_bm_build(void *self) {
     }
     if ((it = add_menu_item(tb, "ui-edit-icon28.png", BM_TAG_PDEV, "Plugin Dev..."))) [gBmItems addObject:[NSValue valueWithPointer:it]];
     if ((it = add_menu_item(tb, "ui-edit-icon28.png", BM_TAG_OPTS, "Editor options..."))) [gBmItems addObject:[NSValue valueWithPointer:it]];
+    gSelMenuList = menu_list(tb); gSelLastItem = it;
     ((void (*)(void *, int))VA(0x100048FF8ULL))(menu_list(tb), 0);   // 0 = スクロール位置を先頭へ(1 だと伸びた分だけ下端基準で見える)
 }
+// 今の「その他」の一覧の最後が、前に足した最後の項目(Editor options...)か。ポインタを比べるだけで、古いポインタの中身は読まない
+static BOOL sel_menu_built(void *self) {
+    void *list = menu_list((uint8_t *)self + 1400), *last = NULL;
+    if (!list || list != gSelMenuList) return NO;
+    for (int i = 0; i < 64; i++) {
+        void *x = ((void *(*)(void *, int))VA(0x100048F14ULL))(list, i);
+        if (!x) break;
+        last = x;
+    }
+    return last && last == gSelLastItem;
+}
 static void sel_add_menu_items(void *self) {   // 「その他」メニューにカテゴリ項目を追加(エディタごとに1回)
-    if (gSelMenuFor == self || !(lay_of(self) || is_taiko(self))) return;
+    // エディタを開き直すと、新しいエディタが前と同じアドレスに作られることがある。アドレスだけで「足し済み」とみなすと
+    // 項目を足さず、標準の項目だけが出ていた(issue #25)→ 一覧の中身でも確かめる
+    if ((gSelMenuFor == self && sel_menu_built(self)) || !(lay_of(self) || is_taiko(self))) return;
     gSelMenuFor = self;
     gBmItems = nil;                                       // 前のエディタの項目は破棄済み
     menu_bm_build(self);
@@ -2933,8 +2948,8 @@ static void ovl_update(void *a1) {
 // 縦 = 時間(拍に比例。FX プレビュー中は G で歪める) / 横 = 周波数(左=低音)。
 #define SPEC_BANDS 96
 #define SPEC_TILE_BEATS 4    // タイルの拍数。タイル内は G を直線で近似するので、FX プレビュー(scroll 変化)での誤差を小さくするため短めに
-#define SPEC_RPB 16
-typedef struct { int frames; int bands; float hopSec; float centerSec; uint8_t *q; } BMSpec;   // centerSec = 窓の中心(N/2)の時刻。フレーム f の時刻 = f*hopSec + centerSec
+#define SPEC_RPB 64          // 1 拍の行数。行の中のどこかで光ると行全体が光るので、16 だと立ち上がりが最大 1 行(120BPM で約 31ms)早く見えた
+typedef struct { int frames; int bands; float hopSec; float centerSec; uint8_t *q; } BMSpec;   // centerSec = フレーム f の時刻 f*hopSec + centerSec の足し分(= 窓の末尾 N。下の spec_compute を参照)
 static BMSpec *gSpec;                 // 計算済みデータ(メインスレッドで参照)
 static volatile int gSpecState;       // 0=未 1=計算中 2=完了 3=失敗
 static int gSpecAlpha = 200;          // 0..255 (既定 約78%。スペクトログラムを主役にする)
@@ -3049,7 +3064,7 @@ static BMSpec *spec_compute(const char *path) {
     float hiDb = sm[(size_t)(ns * 0.995)], loDb = hiDb - 70.0f;
     free(sm);
     BMSpec *sp = calloc(1, sizeof(BMSpec));
-    sp->frames = frames; sp->bands = SPEC_BANDS; sp->hopSec = (float)H / sr; sp->centerSec = (float)(N / 2) / sr;
+    sp->frames = frames; sp->bands = SPEC_BANDS; sp->hopSec = (float)H / sr; sp->centerSec = (float)N / sr;   // 窓の末尾。窓の中心(N/2)だと、窓に音が入り始めた時点で光る分、見える立ち上がりも Check offset の増加量も約 11ms 早く出た(合成音で検証)
     sp->q = malloc(cnt);
     for (size_t i = 0; i < cnt; i++) {
         float t = (db[i] - loDb) / (hiDb - loDb);
@@ -3111,7 +3126,7 @@ static double spec_ms_of_beat(double beat) {
     long m = (long)floor(beat); double fr = beat - (double)m;
     long den = 16384, num = lround(fr * den);
     if (num >= den) { m += 1; num = 0; }
-    *(int32_t *)(buf + 8) = (int32_t)m; *(int32_t *)(buf + 16) = (int32_t)num; *(int32_t *)(buf + 20) = (int32_t)den;
+    beat_set(buf, (BeatV){ (int)m, (int)num, (int)den });   // ★拍 → 時刻(sub_1001F2F9C)は 整数部 + 小数部の float(+12)で読む。分子 / 分母だけだと端数が 0 になり、1 拍の中の行がすべて拍の頭を表示していた
     return time_of(buf) - gSpecOffsetMs;
 }
 
@@ -3124,7 +3139,7 @@ static void *spec_make_tile(void *ed, int k) {
         // 画像の先頭行 = 最も後ろの拍(画面上側)
         double b0 = (double)(k + 1) * SPEC_TILE_BEATS - (r + 1.0) / SPEC_RPB, b1 = b0 + 1.0 / SPEC_RPB;
         double t0 = spec_ms_of_beat(b0), t1 = spec_ms_of_beat(b1);
-        double f0 = (t0 / 1000.0 - gSpec->centerSec) / gSpec->hopSec, f1 = (t1 / 1000.0 - gSpec->centerSec) / gSpec->hopSec;   // 窓の中心の時刻で表示(窓の先頭で表示すると約 23ms 早く見える)
+        double f0 = (t0 / 1000.0 - gSpec->centerSec) / gSpec->hopSec, f1 = (t1 / 1000.0 - gSpec->centerSec) / gSpec->hopSec;   // 窓の末尾の時刻で表示(centerSec)
         int a = (int)ceil(f0), z = (int)ceil(f1) - 1;           // 窓の中心が行の時間範囲 [t0, t1) に入るフレーム
         if (z < a) a = z = (int)lround((f0 + f1) * 0.5);       // 行がホップより短いときは最寄りの 1 フレーム
         for (int b = 0; b < W; b++) {
@@ -3599,7 +3614,7 @@ static void spec_offset_check(void *ed) {
     NSMutableArray<NSNumber *> *all = [NSMutableArray array], *loc = [NSMutableArray array];
     for (int f = 1; f < F - 1; f++) {
         if (flux[f] < thr || flux[f] < flux[f - 1] || flux[f] <= flux[f + 1]) continue;
-        double ms = (((double)f - 0.5) * gSpec->hopSec + gSpec->centerSec) * 1000.0;   // 増加量はフレーム f-1 と f の間 → 両者の中心の中点
+        double ms = (((double)f - 0.5) * gSpec->hopSec + gSpec->centerSec) * 1000.0;   // 増加量はフレーム f-1 と f の間 → 両者の時刻の中点
         double b = spec_beat_of_ms(ms);
         if (b < 0) continue;
         double g = round(b * 4.0) / 4.0;

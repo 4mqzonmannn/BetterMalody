@@ -354,9 +354,15 @@ static void paths_update(void *a1, double pos) {   // プレビュー中は本�
     }
 }
 static void paths_restore(void *a1) {   // OFF: 経路スプライトを元の表示に戻す(座標は触っていない)
-    (void)a1;
-    for (int i = 0; i < gPathN; i++)
-        if (!gPaths[i].shown) node_visible(gPaths[i].sprite, 1);
+    // gPaths[].sprite は使わない: プレビュー中の編集/undo で作り直されると解放済みになる(#実機クラッシュ 11/12)
+    const Lay *l = lay_of(a1);
+    if (l && l->slide) {
+        nvec *ch = node_children(*(void **)((uint8_t *)a1 + 1472));
+        for (void **p = ch->begin; p != ch->end; p++) {
+            uint8_t *note = VT(*p, 704, uint8_t *(*)(void *))(*p);
+            if (note && (note[113] & 8)) node_visible(*p, 1);
+        }
+    }
     paths_free();
 }
 
@@ -2954,6 +2960,7 @@ static BMSpec *gSpec;                 // 計算済みデータ(メインスレ�
 static volatile int gSpecState;       // 0=未 1=計算中 2=完了 3=失敗
 static int gSpecAlpha = 200;          // 0..255 (既定 約78%。スペクトログラムを主役にする)
 static void *gSpecEditor;
+static int gSpecGen;                  // エディタを入り直したら増やす(前の譜面の解析結果を捨てる)
 static NSMutableDictionary<NSNumber *, NSValue *> *gSpecTiles;   // タイル番号 → Sprite
 static double gSpecOffsetMs;
 static NSString *gSpecPath;
@@ -3107,9 +3114,11 @@ static void spec_start(void *ed) {
     gSpecState = 1;
     ed_toast_text(ed, "Spectrogram: analyzing...", 4);
     os_log(L, "spec: start %{public}@ offset=%.0f", ogg, off);
+    int gen = gSpecGen;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         BMSpec *r = spec_compute(ogg.UTF8String);
         dispatch_async(dispatch_get_main_queue(), ^{
+            if (gen != gSpecGen) return;
             gSpec = r; gSpecState = r ? 2 : 3;
             if (r) { deq *bq = BPMQ(); { char tb[400]; int o = 0; static const int bs[] = { 0, 64, 256, 600, 640, 700, 800, 1000, 1500, 2000 }; for (int q = 0; q < 10; q++) o += snprintf(tb + o, sizeof tb - o, " t(%d)=%.1f", bs[q], spec_ms_of_beat(bs[q])); os_log(L, "spec: time map offset=%.0f bpmCount=%lu%{public}s", gSpecOffsetMs, (unsigned long)(bq ? bq->size : 0), tb); } }
             if (!r) os_log(L, "spec: decode failed");
@@ -4365,8 +4374,19 @@ static intptr_t hook_pathhit(void *path, const void *pos) {   // sub_100167514: 
     if (r && pos && !path_tap_near_point(path, pos)) return 0;  // どの中継点からも遠いのに「当たり」= 重複 beat の中継点の誤判定
     return r;
 }
+// エディタに入るたびに、前のエディタの状態を捨てる。前のエディタのノードはもう解放済みなので触らない。
+// (FX ON のまま Slide を抜け → Key で OFF にして落ちた 11/12。新しいエディタが同じアドレスに来ると self != gEditor の判定も効かない)
+static void ed_session_reset(void *self) {
+    if (gPreview) gMarkers = NO;
+    gPreview = NO;
+    paths_free();
+    gSpecEditor = NULL; gSpecHolder = NULL; gSpecGen++;    // spec_update が次のフレームで作り直す
+    gSvgEditor = NULL;
+    gEditor = self;
+}
 static void hook_uiinit(void *self, void *layout) {   // sub_100073140: UI初期化後に Effect パネルのノードを結び付ける
     orig_uiinit(self, layout);
+    if (layout && (lay_of(self) || is_taiko(self))) ed_session_reset(self);
     if (layout) { gFxClickRegistered = NO; fx_bind(self, layout); pl_bind(self, layout); sd_bind(self, layout); }
     mk_reset();
     if (layout && lay_of(self)) {          // 情報画面の追加項目(Video / BGA / Skin)のラベルを結び付けて現在値を表示
